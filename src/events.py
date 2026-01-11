@@ -324,7 +324,7 @@ def demo_motion_on_pair(
         cameras_to_run: List[str] = ["road", "cabin"]
     else:
         cameras_to_run = [camera]
-    print(cameras_to_run)
+
     for cam in cameras_to_run:
         video_path = _select_video_from_pair(pair, cam)
         print(f"\n[motion] Running on {cam.upper()} camera ({video_path.name})")
