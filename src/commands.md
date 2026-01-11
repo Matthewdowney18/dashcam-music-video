@@ -9,7 +9,7 @@ source .venv/bin/activate
 python -m src.ingest --base-dir "/media/matt/2004-1014/DCIM"
 
 ## detect motion spikes in a clip
-python -m src.events --base-dir "/media/matt/2004-1014/DCIM" --index 7 --mode motion
+python -m src.events --base-dir "/media/matt/2004-1014/DCIM" --index 7 
 
 ## detect smooth flow segments 
 python -m src.events --base-dir "/media/matt/2004-1014/DCIM" --index 7 --mode smooth

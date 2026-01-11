@@ -23,7 +23,8 @@ class MotionEvent:
             f"{self.start_time:6.2f}s → {self.end_time:6.2f}s "
             f"(peak {self.peak_time:6.2f}s, score={self.score:.3f})"
         )
-    
+
+
 @dataclass
 class SmoothSegment:
     """A stretch of smooth, flowing motion (good driving aesthetic)."""
@@ -36,6 +37,7 @@ class SmoothSegment:
             f"{self.start_time:6.2f}s → {self.end_time:6.2f}s "
             f"(mean_flow={self.mean_flow:.3f})"
         )
+
 
 def detect_motion_events(
     video_path: Path,
@@ -156,6 +158,7 @@ def detect_motion_events(
     print(f"[motion] Detected {len(events_sorted)} motion events.")
     return events_sorted
 
+
 def detect_smooth_segments(
     video_path: Path,
     downscale_width: int = 320,
@@ -166,15 +169,14 @@ def detect_smooth_segments(
     """
     Detect segments of sustained motion using only optical-flow magnitude.
 
+    NOTE: This is experimental / unused by the CLI right now.
+
     Simpler heuristic:
     - Compute optical flow magnitude between frames.
     - Choose a threshold as the given percentile of magnitudes.
     - Any time range where flow >= threshold is considered "moving enough".
     - Group consecutive frames above threshold into segments of at least
       `min_duration_sec`.
-
-    This will give us segments where the car is clearly moving, which are
-    good candidates for smooth / flowing driving.
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -278,15 +280,31 @@ def detect_smooth_segments(
 # ---------------------------------------------------------------------------
 
 
+def _select_video_from_pair(pair, camera: str) -> Path:
+    """
+    Utility to pick the right video from a road/cabin pair.
+    camera: 'road' | 'cabin'
+    """
+    if camera == "road":
+        return pair.road
+    elif camera == "cabin":
+        return pair.cabin
+    else:
+        raise ValueError(f"Unknown camera: {camera!r} (expected 'road' or 'cabin')")
+
+
 def demo_motion_on_pair(
     base_dir: Path,
     pair_index: int = 0,
+    camera: str = "road",
 ) -> None:
     """
     Convenience function:
     - load road/cabin pair using ingest.py
-    - run motion detection on the road camera
+    - run motion detection on the chosen camera
     - print out candidate event segments
+
+    camera: 'road', 'cabin', or 'both'
     """
     cfg = DashcamConfig(base_dir=base_dir)
     pairs = discover_pairs(cfg)
@@ -301,19 +319,37 @@ def demo_motion_on_pair(
     print("  road :", pair.road)
     print("  cabin:", pair.cabin)
 
-    events = detect_motion_events(pair.road)
-    if not events:
-        print("No events detected.")
-        return
+    # If the user wants both, just run twice with labels.
+    if camera == "both":
+        cameras_to_run: List[str] = ["road", "cabin"]
+    else:
+        cameras_to_run = [camera]
+    print(cameras_to_run)
+    for cam in cameras_to_run:
+        video_path = _select_video_from_pair(pair, cam)
+        print(f"\n[motion] Running on {cam.upper()} camera ({video_path.name})")
+        events = detect_motion_events(video_path)
+        if not events:
+            print("  No events detected.")
+            continue
 
-    print("\nCandidate motion events:")
-    for e in events:
-        print("  ", e)
+        print("\n  Candidate motion events:")
+        for e in events:
+            print("   ", e)
+
 
 def demo_smooth_on_pair(
     base_dir: Path,
     pair_index: int = 0,
+    camera: str = "road",
 ) -> None:
+    """
+    Run smooth segment detection on a chosen camera in a pair.
+
+    NOTE: Not wired to the CLI right now; for experimentation only.
+
+    camera: 'road', 'cabin', or 'both'
+    """
     cfg = DashcamConfig(base_dir=base_dir)
     pairs = discover_pairs(cfg)
 
@@ -327,21 +363,29 @@ def demo_smooth_on_pair(
     print("  road :", pair.road)
     print("  cabin:", pair.cabin)
 
-    segments = detect_smooth_segments(pair.road)
-    if not segments:
-        print("No smooth segments detected.")
-        return
+    if camera == "both":
+        cameras_to_run: List[str] = ["road", "cabin"]
+    else:
+        cameras_to_run = [camera]
 
-    print("\nSmooth driving segments:")
-    for s in segments:
-        print("  ", s)
+    for cam in cameras_to_run:
+        video_path = _select_video_from_pair(pair, cam)
+        print(f"\n[smooth] Running on {cam.upper()} camera ({video_path.name})")
+        segments = detect_smooth_segments(video_path)
+        if not segments:
+            print("  No smooth segments detected.")
+            continue
+
+        print("\n  Smooth driving segments:")
+        for s in segments:
+            print("   ", s)
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Detect driving events (motion spikes / smooth segments) on dashcam pairs."
+        description="Detect driving motion spikes on dashcam pairs."
     )
     parser.add_argument(
         "--base-dir",
@@ -357,18 +401,20 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
-        choices=["motion", "smooth", "both"],
+        choices=["motion"],
         default="motion",
-        help="What to run: motion spikes, smooth segments, or both.",
+        help="What to run. (Currently only motion spikes are supported.)",
+    )
+    parser.add_argument(
+        "--camera",
+        choices=["road", "cabin", "both"],
+        default="both",
+        help="Which camera to analyze.",
     )
     args = parser.parse_args()
 
     base = Path(args.base_dir)
 
-    if args.mode in ("motion", "both"):
-        print("\n=== MOTION SPIKES ===")
-        demo_motion_on_pair(base_dir=base, pair_index=args.index)
-
-    if args.mode in ("smooth", "both"):
-        print("\n=== SMOOTH SEGMENTS ===")
-        demo_smooth_on_pair(base_dir=base, pair_index=args.index)
+    # For now, we always run motion spikes; --mode exists for future extension.
+    print("\n=== MOTION SPIKES ===")
+    demo_motion_on_pair(base_dir=base, pair_index=args.index, camera=args.camera)
