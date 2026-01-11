@@ -7,7 +7,9 @@ from typing import List
 from .ingest import DashcamConfig, discover_pairs, print_ingest_summary
 from .events import detect_motion_events, MotionEvent
 from .audio_events import detect_audio_events_for_clip
-from .layout import make_vertical_test_output
+from .layout import make_vertical_test_output_preset
+
+from .types.adapters import motion_events_to_canonical, audio_events_to_canonical
 
 
 def _get_pair(base_dir: Path, index: int):
@@ -60,6 +62,10 @@ def cmd_motion(args):
             max_events=args.max_events,
         )
         _fmt_events(events)
+        if args.canonical:
+            canonical = motion_events_to_canonical(events, camera=cam)  # cam is "road" or "cabin"
+            print("\n  [canonical]")
+            _fmt_events(canonical)
 
 
 def cmd_audio(args):
@@ -81,6 +87,11 @@ def cmd_audio(args):
         )
         _fmt_events(events)
 
+        if args.canonical:
+            canonical = audio_events_to_canonical(events, camera=cam)  # cam is "road" or "cabin"
+            print("\n  [canonical]")
+            _fmt_events(canonical)  
+
         if args.debug_npy_prefix:
             import numpy as np
             prefix = f"{args.debug_npy_prefix}_{cam}"
@@ -89,12 +100,10 @@ def cmd_audio(args):
 
 
 def cmd_layout(args):
-    make_vertical_test_output(
+    make_vertical_test_output_preset(
         base_dir=Path(args.base_dir),
         out_path=Path(args.out),
         pair_index=args.index,
-        target_width=args.target_width,
-        target_height=args.target_height,
         max_duration=args.seconds,
     )
 
@@ -128,6 +137,7 @@ def build_parser():
     s.add_argument("--min-event-gap-sec", type=float, default=5.0)
     s.add_argument("--threshold-std", type=float, default=2.0)
     s.add_argument("--max-events", type=int, default=20)
+    s.add_argument("--canonical", action="store_true")
     s.set_defaults(func=cmd_motion)
 
     s = sub.add_parser("audio")
@@ -140,14 +150,14 @@ def build_parser():
     s.add_argument("--min-event-gap-sec", type=float, default=1.0)
     s.add_argument("--max-events", type=int, default=10)
     s.add_argument("--debug-npy-prefix")
+    s.add_argument("--canonical", action="store_true")
     s.set_defaults(func=cmd_audio)
 
     s = sub.add_parser("layout")
     s.add_argument("--index", type=int, default=0)
     s.add_argument("--out", default="output/test_vertical.mp4")
-    s.add_argument("--seconds", type=float, default=10.0)
-    s.add_argument("--target-width", type=int, default=1080)
-    s.add_argument("--target-height", type=int, default=1920)
+    s.add_argument("--seconds", type=float, default=60.0)
+    s.add_argument("--preset", default="caption1080")
     s.set_defaults(func=cmd_layout)
 
     return p
