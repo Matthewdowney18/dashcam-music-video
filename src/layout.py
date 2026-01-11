@@ -72,39 +72,3 @@ def make_vertical_test_output(
     print("Done.")
 
 
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Vertical split-screen test renderer")
-    parser.add_argument(
-        "--base-dir",
-        type=str,
-        required=True,
-        help="Path to DCIM folder containing DCIMA and DIMCB",
-    )
-    parser.add_argument(
-        "--out",
-        type=str,
-        default="output/test/test_vertical.mp4",
-        help="Output MP4 path",
-    )
-    parser.add_argument(
-        "--index",
-        type=int,
-        default=0,
-        help="Which clip pair index to use (0-based)",
-    )
-    parser.add_argument(
-        "--seconds",
-        type=float,
-        default=10.0,
-        help="Optional: trim to this many seconds for faster tests (default 10)",
-    )
-    args = parser.parse_args()
-
-    make_vertical_test_output(
-        base_dir=Path(args.base_dir),
-        out_path=Path(args.out),
-        pair_index=args.index,
-        max_duration=args.seconds,
-    )

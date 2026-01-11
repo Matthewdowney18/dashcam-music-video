@@ -106,7 +106,7 @@ def discover_pairs(config: DashcamConfig) -> List[ClipPair]:
 # ---- CLI / debug entrypoint -------------------------------------------------
 
 
-def _print_summary(pairs: List[ClipPair], config: DashcamConfig) -> None:
+def print_ingest_summary(pairs: List[ClipPair], config: DashcamConfig, show: int = 10) -> None:
     print("Dashcam ingest summary")
     print("======================")
     print(f"Base dir : {config.base_dir}")
@@ -114,7 +114,7 @@ def _print_summary(pairs: List[ClipPair], config: DashcamConfig) -> None:
     print(f"Cabin dir: {config.cabin_dir}")
     print(f"Total paired clips: {len(pairs)}\n")
 
-    show_n = min(10, len(pairs))
+    show_n = min(show, len(pairs))
     if show_n:
         print(f"First {show_n} pairs:")
         for p in pairs[:show_n]:
@@ -122,38 +122,3 @@ def _print_summary(pairs: List[ClipPair], config: DashcamConfig) -> None:
     else:
         print("No pairs found. Check folder names / extensions.")
 
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Discover paired dashcam clips (road + cabin)."
-    )
-    parser.add_argument(
-        "--base-dir",
-        type=str,
-        default=str(DEFAULT_BASE_DIR),
-        help="Path to DCIM folder containing DCIMA/DIMCB (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--road-dir",
-        type=str,
-        default=DEFAULT_ROAD_DIR_NAME,
-        help="Subdirectory name for road/exterior camera.",
-    )
-    parser.add_argument(
-        "--cabin-dir",
-        type=str,
-        default=DEFAULT_CABIN_DIR_NAME,
-        help="Subdirectory name for cabin/interior camera.",
-    )
-    args = parser.parse_args()
-
-    cfg = DashcamConfig(
-        base_dir=Path(args.base_dir),
-        road_dir_name=args.road_dir,
-        cabin_dir_name=args.cabin_dir,
-    )
-
-    pairs = discover_pairs(cfg)
-    _print_summary(pairs, cfg)

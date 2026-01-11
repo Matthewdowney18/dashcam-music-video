@@ -1,22 +1,23 @@
-# Dashcam Music Video – Useful Commands
+# Dashcam Pipeline — Commands
 
 ```bash
-
-## setup venv
 source .venv/bin/activate
+BASE="/media/matt/2004-1014/DCIM"
 
-## Ingest
-python -m src.ingest --base-dir "/media/matt/2004-1014/DCIM"
+# ingest
+python -m src.run --base-dir "$BASE" ingest --show 10
 
-## detect motion spikes in a clip
-python -m src.events --base-dir "/media/matt/2004-1014/DCIM" --index 7 
+# motion
+python -m src.run --base-dir "$BASE" motion --index 7 --camera both
 
-## detect smooth flow segments 
-python -m src.events --base-dir "/media/matt/2004-1014/DCIM" --index 7 --mode smooth
+# audio
+python -m src.run --base-dir "$BASE" audio --index 7 --camera road
 
-## combine two cameras into one picture
-python -m src.layout \
-    --base-dir "/media/matt/2004-1014/DCIM" \
-    --out "output/test/test_vertical_7.mp4" \
-    --index 7 \
-    --seconds 60
+# layout render
+python -m src.run --base-dir "$BASE" layout \
+  --index 7 \
+  --out output/test_vertical_7.mp4 \
+  --seconds 10
+
+# help
+python -m src.run --help
