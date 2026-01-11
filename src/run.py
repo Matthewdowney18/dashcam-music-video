@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 import argparse
 from pathlib import Path
 from typing import List
 
 from .ingest import DashcamConfig, discover_pairs, print_ingest_summary
-from .events import detect_motion_events, MotionEvent
+from .motion_events import detect_motion_events, MotionEvent
 from .audio_events import detect_audio_events_for_clip
 from .layout import make_vertical_test_output_preset
 
+from .types.events import EventSet, Event
 from .types.adapters import motion_events_to_canonical, audio_events_to_canonical
 
 
@@ -25,8 +28,27 @@ def _get_pair(base_dir: Path, index: int):
 def _fmt_events(events: List[object]) -> None:
     if not events:
         print("  (none)")
+        return
     for ev in events:
         print(" ", ev)
+
+
+def _fmt_eventset(es: EventSet) -> None:
+    es = es.validated()
+    print(f"  video_path: {es.video_path}")
+    if not es.events:
+        print("  (none)")
+        return
+    for ev in es.events:
+        print(" ", ev)
+
+
+def _write_eventset_json(es: EventSet, out_path: str) -> None:
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        json.dump(asdict(es), f, indent=2)
+    print(f"  wrote: {p}")
 
 
 # -----------------------------
@@ -63,10 +85,12 @@ def cmd_motion(args):
         )
         _fmt_events(events)
         if args.canonical:
-            canonical = motion_events_to_canonical(events, camera=cam)  # cam is "road" or "cabin"
-            print("\n  [canonical]")
-            _fmt_events(canonical)
-
+            canonical_events = motion_events_to_canonical(events, camera=cam)
+            es = EventSet(video_path=str(path), events=canonical_events).validated()
+            if args.json:
+                _write_eventset_json(es, args.json)
+            print("\n  [canonical EventSet]")
+            _fmt_eventset(es)
 
 def cmd_audio(args):
     pair = _get_pair(Path(args.base_dir), args.index)
@@ -88,9 +112,12 @@ def cmd_audio(args):
         _fmt_events(events)
 
         if args.canonical:
-            canonical = audio_events_to_canonical(events, camera=cam)  # cam is "road" or "cabin"
-            print("\n  [canonical]")
-            _fmt_events(canonical)  
+            canonical_events = audio_events_to_canonical(events, camera=cam)
+            es = EventSet(video_path=str(path), events=canonical_events).validated()
+            if args.json:
+                _write_eventset_json(es, args.json)
+            print("\n  [canonical EventSet]")
+            _fmt_eventset(es)
 
         if args.debug_npy_prefix:
             import numpy as np
@@ -138,6 +165,7 @@ def build_parser():
     s.add_argument("--threshold-std", type=float, default=2.0)
     s.add_argument("--max-events", type=int, default=20)
     s.add_argument("--canonical", action="store_true")
+    s.add_argument("--json", help="Write canonical EventSet to this JSON file (requires --canonical)")
     s.set_defaults(func=cmd_motion)
 
     s = sub.add_parser("audio")
@@ -151,6 +179,7 @@ def build_parser():
     s.add_argument("--max-events", type=int, default=10)
     s.add_argument("--debug-npy-prefix")
     s.add_argument("--canonical", action="store_true")
+    s.add_argument("--json", help="Write canonical EventSet to this JSON file (requires --canonical)")
     s.set_defaults(func=cmd_audio)
 
     s = sub.add_parser("layout")

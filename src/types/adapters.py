@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List
 
 from .events import Event, Camera
-from ..events import MotionEvent  # this imports from src/events.py (motion module)
+from ..motion_events import MotionEvent  # this imports from src/events.py (motion module)
 from ..audio_events import AudioEvent
 
 
