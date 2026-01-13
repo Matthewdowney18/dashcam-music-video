@@ -10,6 +10,7 @@ from .ingest import DashcamConfig, discover_pairs, print_ingest_summary
 from .motion_events import detect_motion_events, MotionEvent
 from .audio_events import detect_audio_events_for_clip
 from .layout import make_vertical_test_output_preset
+from .layout import make_vertical_captioned_output_preset
 
 from .types.events import EventSet, Event
 from .types.adapters import motion_events_to_canonical, audio_events_to_canonical
@@ -50,10 +51,47 @@ def _write_eventset_json(es: EventSet, out_path: str) -> None:
         json.dump(asdict(es), f, indent=2)
     print(f"  wrote: {p}")
 
+def _get_last_indices(base_dir: Path, n: int) -> List[int]:
+    cfg = DashcamConfig(base_dir=base_dir)
+    pairs = discover_pairs(cfg)
+    if not pairs:
+        raise RuntimeError("No clip pairs found.")
+    n = min(n, len(pairs))
+    start = len(pairs) - n
+    return list(range(start, len(pairs)))
 
 # -----------------------------
 # Commands
 # -----------------------------
+
+def cmd_captioned_last(args):
+    base_dir = Path(args.base_dir)
+    indices = _get_last_indices(base_dir, args.last)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[captioned-last] rendering indices: {indices}")
+
+    for idx in indices:
+        out_path = out_dir / f"captioned_{idx:04d}.mp4"
+        print(f"\n[captioned-last] index={idx} -> {out_path}")
+        make_vertical_captioned_output_preset(
+            base_dir=base_dir,
+            out_path=out_path,
+            pair_index=idx,
+            preset=args.preset,
+            max_duration=args.seconds,
+        )
+
+def cmd_captioned(args):
+    make_vertical_captioned_output_preset(
+        base_dir=Path(args.base_dir),
+        out_path=Path(args.out),
+        pair_index=args.index,
+        preset=args.preset,
+        max_duration=args.seconds,
+        detect_camera=args.detect_camera,
+    )
 
 def cmd_ingest(args):
     cfg = DashcamConfig(
@@ -188,6 +226,21 @@ def build_parser():
     s.add_argument("--seconds", type=float, default=60.0)
     s.add_argument("--preset", default="caption1080")
     s.set_defaults(func=cmd_layout)
+
+    s = sub.add_parser("captioned")
+    s.add_argument("--index", type=int, default=0)
+    s.add_argument("--out", default="output/captioned.mp4")
+    s.add_argument("--seconds", type=float, default=60.0)
+    s.add_argument("--preset", default="debug720")  # uses caption band
+    s.add_argument("--detect-camera", choices=["road", "cabin"], default="road")
+    s.set_defaults(func=cmd_captioned)
+
+    s = sub.add_parser("captioned-last")
+    s.add_argument("--last", type=int, default=10)
+    s.add_argument("--out-dir", default="output/captioned_last")
+    s.add_argument("--seconds", type=float, default=60.0)
+    s.add_argument("--preset", default="debug720")
+    s.set_defaults(func=cmd_captioned_last)
 
     return p
 
