@@ -1,4 +1,18 @@
-# src/types/events.py
+"""
+events.py
+
+Core event and time-interval type definitions used throughout the pipeline.
+
+Events represent interesting time ranges on a clip timeline (e.g., motion peaks,
+audio spikes) along with optional scores and metadata. These types provide a
+common language between detection modules, scoring/selection logic, and layout/
+caption rendering.
+
+Design goals:
+- Consistent, minimal representation of time ranges (start/end seconds)
+- Extensible metadata for debugging (peak value, label, source module, etc.)
+- Suitable for serialization (e.g., JSON) when saving analysis outputs
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

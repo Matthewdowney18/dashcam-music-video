@@ -1,3 +1,25 @@
+"""
+ingest.py
+
+Dashcam clip ingestion and pairing utilities.
+
+Responsibilities typically include:
+- Scanning an input directory for raw dashcam clips
+- Pairing "inside/cabin" and "outside/road" clips by shared index/filename pattern
+- Sorting clips into deterministic order for analysis and rendering
+- Providing simple metadata (paths, indices, durations when available)
+
+Design goals:
+- Keep ingestion deterministic and easy to debug
+- Avoid expensive decoding work; prefer probing (e.g., ffprobe) when needed
+- Make downstream steps independent of filesystem naming quirks by normalizing
+  into a structured representation
+
+This module should NOT:
+- Perform motion/audio analysis (handled by motion_events/audio_events)
+- Render or re-encode video (handled by layout/layout_progress)
+"""
+
 from __future__ import annotations
 
 import re

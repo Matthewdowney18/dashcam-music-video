@@ -1,3 +1,28 @@
+"""
+audio_events.py
+
+Audio activity detection for dashcam clips.
+
+This module detects time ranges where audio energy spikes (e.g., passing cars,
+horns, bumps, cabin noise) and converts them into structured "events" that can
+be used for selecting or annotating interesting moments.
+
+Typical responsibilities:
+- Extracting or reading audio streams from video sources
+- Computing short-time energy / loudness proxies (RMS, peak, etc.)
+- Smoothing and thresholding to identify candidate events
+- Returning event intervals aligned to the clip timeline
+
+Design goals:
+- Fast, CPU-friendly analysis suitable for batch runs
+- Deterministic results with configurable thresholds/windowing
+- Compatible with paired inside/outside clips (often sharing the same audio)
+
+This module should NOT:
+- Perform speech recognition or semantic audio classification
+- Control video layout or caption rendering (handled elsewhere)
+"""
+
 from __future__ import annotations
 
 import argparse

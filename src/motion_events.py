@@ -1,3 +1,28 @@
+"""
+motion_events.py
+
+Motion/activity detection for dashcam video.
+
+This module computes motion scores and/or detects time ranges ("events") where
+visual activity is elevated, suitable for selecting interesting driving moments.
+It is designed for CPU-only execution and batch processing of many short clips.
+
+Typical responsibilities:
+- Sampling frames or downscaled video for lightweight motion estimation
+- Producing per-time-bin motion intensity series
+- Converting intensity peaks into event intervals with configurable thresholds
+  and smoothing/debouncing
+
+Outputs from this module are generally consumed by:
+- selection/scoring logic (top-N moments)
+- debug visualizations / captions
+- layout/render orchestration to extract and stitch segments
+
+This module should NOT:
+- Assume a specific UI layout or caption format
+- Invoke final rendering directly (layout handles that)
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

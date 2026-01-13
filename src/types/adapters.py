@@ -1,3 +1,20 @@
+"""
+adapters.py
+
+Adapter and interface types that decouple pipeline modules.
+
+This module defines lightweight protocols / typed adapters for plugging different
+implementations into the same pipeline steps (e.g., different event detectors,
+different clip sources, different render backends).
+
+Typical uses:
+- Specify "what a detector provides" without importing its implementation
+- Allow mocking/stubbing in tests or quick experimentation
+- Keep orchestration code (run.py) clean and type-safe
+
+This module should remain dependency-light and avoid importing heavy modules.
+"""
+
 from __future__ import annotations
 
 from typing import List

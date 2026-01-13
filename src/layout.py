@@ -1,3 +1,30 @@
+"""
+layout.py
+
+Video composition and layout utilities for producing debug and presentation
+renders from dashcam clips.
+
+This module defines how source videos are arranged into a single output frame
+(e.g., inside+outside stacked, optional caption panel, debug overlays). It is
+primarily responsible for generating FFmpeg filter graphs / commands that
+implement the layout efficiently.
+
+Typical responsibilities:
+- Defining layout presets (stacked, side-by-side, caption area, etc.)
+- Building FFmpeg filter_complex strings for scaling, padding, stacking, and text
+- Keeping layout logic separate from event detection/scoring
+
+Design goals:
+- Use FFmpeg for composition (avoid Python-frame rendering)
+- Make layouts reproducible and easy to tweak via named presets
+- Keep render configuration explicit (dimensions, fonts, margins, etc.)
+
+This module should NOT:
+- Detect events (motion/audio) or choose segments
+- Implement progress parsing (handled by layout_progress)
+"""
+
+
 from __future__ import annotations
 
 import subprocess

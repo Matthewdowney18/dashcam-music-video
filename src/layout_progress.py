@@ -1,3 +1,35 @@
+"""
+layout_progress.py
+
+Utilities for tracking and displaying progress during video layout and rendering
+operations in the dashcam processing pipeline.
+
+This module is responsible for:
+- Parsing progress information from long-running FFmpeg processes
+- Converting raw timing/frame data into human-readable progress metrics
+- Rendering a lightweight progress indicator suitable for CLI use
+- Remaining decoupled from video layout logic and FFmpeg invocation itself
+
+Design goals:
+- Minimal overhead (CPU-only environment, no GPU assumptions)
+- Works with streamed FFmpeg stderr/stdout without requiring re-encoding
+- Safe to use for long batch jobs (multiple clips, stacked layouts, captions)
+- Easy to disable or swap out for other progress UIs in the future
+
+Intended usage:
+- Called by layout / render orchestration code
+- Receives incremental FFmpeg output or timestamps
+- Emits progress updates (percentage, ETA, elapsed time, etc.)
+
+This module does NOT:
+- Invoke FFmpeg directly
+- Perform any video decoding or encoding
+- Depend on GUI frameworks or external progress libraries
+
+Keeping progress reporting isolated here allows layout, captioning,
+and clip-selection logic to remain simple and testable.
+"""
+
 import re
 import sys
 import subprocess

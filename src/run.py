@@ -1,3 +1,24 @@
+"""
+run.py
+
+Command-line entry point for the dashcam pipeline.
+
+This module wires together the main workflow steps (ingest -> analysis -> scoring
+-> layout/render) and exposes them as CLI commands/options. It should stay
+lightweight and orchestration-focused: parsing arguments, choosing defaults,
+calling into library modules, and printing user-facing status.
+
+Design goals:
+- Keep core logic out of the CLI layer (delegate to src/*.py modules)
+- Provide sane defaults for fast iteration on CPU-only hardware
+- Make it easy to run targeted steps for debugging (e.g., motion only, audio only)
+
+This module should NOT:
+- Implement heavy processing logic directly
+- Encode pipeline state in global variables
+- Contain FFmpeg filter graphs or rendering logic (handled by layout modules)
+"""
+
 from __future__ import annotations
 
 import json
