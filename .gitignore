@@ -1,16 +1,31 @@
-# Python venv
-.venv/
+ Python
 __pycache__/
 *.pyc
+.venv/
+.env
 
-# VSCode
-.vscode/
-
-# Large video/cache folders
-data/
+# Outputs
 output/
+outputs/
+tmp/
 cache/
+*.log
 
-# OS files
+# Media artifacts
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.png
+*.jpg
+*.jpeg
+
+# Data dumps
+*.json
+*.csv
+
+# OS/editor
 .DS_Store
-
+.idea/
+.vscode/
