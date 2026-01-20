@@ -113,6 +113,13 @@ kill <PID>
 
 ---
 
+## Project Export
+Compress repo to upload to chatGPT.
+```bash
+make -f tools/project_export/Makefile export
+```
+
+
 ## Help
 ```bash
 python -m src.run --help
