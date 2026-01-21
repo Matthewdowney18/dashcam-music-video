@@ -34,6 +34,7 @@ from typing import Optional, Dict
 
 from .ingest import DashcamConfig, discover_pairs
 from .layout_progress import _ffprobe_duration_seconds, _run_ffmpeg_with_progress
+from .config_loader import ConfigLoader
 
 @dataclass(frozen=True)
 class LayoutPreset:
@@ -88,6 +89,42 @@ PRESETS: Dict[str, LayoutPreset] = {
         crf=24,
     ),
 }
+
+
+@dataclass(frozen=True)
+class OverlayConfig:
+    base_bar_color: str
+    active_bar_color: str
+    dot_color: str
+    dot_window_sec: float
+    show_lane_headers: bool
+    show_event_text: bool
+
+
+DEFAULT_OVERLAY_CONFIG = OverlayConfig(
+    base_bar_color="white@0.25",
+    active_bar_color="yellow@0.85",
+    dot_color="red@1.0",
+    dot_window_sec=0.15,
+    show_lane_headers=True,
+    show_event_text=True,
+)
+
+
+def _load_overlay_config() -> OverlayConfig:
+    loader = ConfigLoader.from_env()
+    data = loader.load_layout()
+    overlay = data.get("overlay", {}) if isinstance(data, dict) else {}
+    if not isinstance(overlay, dict):
+        return DEFAULT_OVERLAY_CONFIG
+    return OverlayConfig(
+        base_bar_color=str(overlay.get("base_bar_color", DEFAULT_OVERLAY_CONFIG.base_bar_color)),
+        active_bar_color=str(overlay.get("active_bar_color", DEFAULT_OVERLAY_CONFIG.active_bar_color)),
+        dot_color=str(overlay.get("dot_color", DEFAULT_OVERLAY_CONFIG.dot_color)),
+        dot_window_sec=float(overlay.get("dot_window_sec", DEFAULT_OVERLAY_CONFIG.dot_window_sec)),
+        show_lane_headers=bool(overlay.get("show_lane_headers", DEFAULT_OVERLAY_CONFIG.show_lane_headers)),
+        show_event_text=bool(overlay.get("show_event_text", DEFAULT_OVERLAY_CONFIG.show_event_text)),
+    )
 
 
 
@@ -363,6 +400,8 @@ def _make_captioned_output_preset(
     if panel_width < 0:
         raise ValueError("panel_width must be >= 0")
 
+    overlay_cfg = _load_overlay_config()
+
     p = PRESETS[preset]
     if p.caption_height <= 0:
         raise ValueError("Preset must include a caption band (caption_height > 0).")
@@ -453,11 +492,17 @@ def _make_captioned_output_preset(
             t = max(0.0, min(float(t), duration_s))
             return panel_x0 + margin_x + (t / duration_s) * timeline_w
 
-        def add_lane(lane: List[OverlayEvent], row_index: int, tag_in: str, header: str, text_events: bool) -> str:
+        def add_lane(
+            lane: List[OverlayEvent],
+            row_index: int,
+            tag_in: str,
+            header: str,
+            text_events: bool,
+        ) -> str:
             header_y = panel_y0 + row_index * row_h + y_pad
             timeline_y = panel_y0 + row_index * row_h + y_pad + int(row_h * 0.55)
             cur = tag_in
-            if header:
+            if header and overlay_cfg.show_lane_headers:
                 out_header = f"v_lane_{row_index}_hdr"
                 safe_header = _escape_drawtext(header)
                 filters.append(
@@ -477,19 +522,19 @@ def _make_captioned_output_preset(
                 out_box = f"v_lane_{row_index}_{k}_box"
                 filters.append(
                     f"{cur}drawbox=x={x_start:.2f}:y={timeline_y}:w={w_box:.2f}:h={h_box}:"
-                    f"color=white@0.25:t=fill:enable='1'"
+                    f"color={overlay_cfg.base_bar_color}:t=fill:enable='1'"
                     f"[{out_box}]"
                 )
                 cur = f"[{out_box}]"
                 out_box_active = f"v_lane_{row_index}_{k}_box_active"
                 filters.append(
                     f"{cur}drawbox=x={x_start:.2f}:y={timeline_y}:w={w_box:.2f}:h={h_box}:"
-                    f"color=yellow@0.85:t=fill:"
+                    f"color={overlay_cfg.active_bar_color}:t=fill:"
                     f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
                     f"[{out_box_active}]"
                 )
                 cur = f"[{out_box_active}]"
-                if text_events:
+                if text_events and overlay_cfg.show_event_text:
                     out_tag = f"v_lane_{row_index}_{k}"
                     safe_label = _escape_drawtext(e.label)
                     filters.append(
@@ -511,11 +556,11 @@ def _make_captioned_output_preset(
                     cur = f"[{out_tag_active}]"
 
                 out_tag2 = f"v_lane_{row_index}_{k}_dot"
-                dot_start = max(0.0, e.peak - 0.15)
-                dot_end = e.peak + 0.15
+                dot_start = max(0.0, e.peak - overlay_cfg.dot_window_sec)
+                dot_end = e.peak + overlay_cfg.dot_window_sec
                 filters.append(
                     f"{cur}drawbox=x={x_peak - 9:.2f}:y={timeline_y}:w=18:h=18:"
-                    f"color=red@1.0:t=fill:"
+                    f"color={overlay_cfg.dot_color}:t=fill:"
                     f"enable='between(t,{dot_start:.3f},{dot_end:.3f})'"
                     f"[{out_tag2}]"
                 )
@@ -523,7 +568,7 @@ def _make_captioned_output_preset(
             return cur
 
         vtag = "[vbase]"
-        debug_text_events = (quality == "final")
+        debug_text_events = overlay_cfg.show_event_text and (quality == "final")
         for idx, lane in enumerate(lanes):
             allow_event_text = debug_text_events and lane.key != "score"
             vtag = add_lane(lane.events, idx, vtag, lane.title, allow_event_text)
@@ -554,33 +599,34 @@ def _make_captioned_output_preset(
             y_dot = band_y + row_index * row_h + int(row_h * 0.62)
             cur = tag_in
             for k, e in enumerate(lane):
-                out_tag = f"v_lane_{row_index}_{k}"
-                safe_label = _escape_drawtext(e.label)
-                filters.append(
-                    f"{cur}drawtext=fontfile={fontfile}:"
-                    f"text='{safe_label}':x=24:y={y_text}:"
-                    f"fontsize={int(row_h*0.55)}:fontcolor=white@0.85:"
-                    f"enable='1'"
-                    f"[{out_tag}]"
-                )
-                cur = f"[{out_tag}]"
-                out_tag_active = f"v_lane_{row_index}_{k}_active"
-                filters.append(
-                    f"{cur}drawtext=fontfile={fontfile}:"
-                    f"text='{safe_label}':x=24:y={y_text}:"
-                    f"fontsize={int(row_h*0.55)}:fontcolor=yellow@1.0:"
-                    f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
-                    f"[{out_tag_active}]"
-                )
-                cur = f"[{out_tag_active}]"
+                if overlay_cfg.show_event_text:
+                    out_tag = f"v_lane_{row_index}_{k}"
+                    safe_label = _escape_drawtext(e.label)
+                    filters.append(
+                        f"{cur}drawtext=fontfile={fontfile}:"
+                        f"text='{safe_label}':x=24:y={y_text}:"
+                        f"fontsize={int(row_h*0.55)}:fontcolor=white@0.85:"
+                        f"enable='1'"
+                        f"[{out_tag}]"
+                    )
+                    cur = f"[{out_tag}]"
+                    out_tag_active = f"v_lane_{row_index}_{k}_active"
+                    filters.append(
+                        f"{cur}drawtext=fontfile={fontfile}:"
+                        f"text='{safe_label}':x=24:y={y_text}:"
+                        f"fontsize={int(row_h*0.55)}:fontcolor=yellow@1.0:"
+                        f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                        f"[{out_tag_active}]"
+                    )
+                    cur = f"[{out_tag_active}]"
 
                 out_tag2 = f"v_lane_{row_index}_{k}_dot"
-                dot_start = max(0.0, e.peak - 0.15)
-                dot_end = e.peak + 0.15
+                dot_start = max(0.0, e.peak - overlay_cfg.dot_window_sec)
+                dot_end = e.peak + overlay_cfg.dot_window_sec
                 out_bar = f"v_lane_{row_index}_{k}_bar"
                 filters.append(
                     f"{cur}drawbox=x=24:y={y_dot}:w={target_width - 84}:h=8:"
-                    f"color=white@0.18:t=fill:"
+                    f"color={overlay_cfg.base_bar_color}:t=fill:"
                     f"enable='1'"
                     f"[{out_bar}]"
                 )
@@ -588,14 +634,14 @@ def _make_captioned_output_preset(
                 out_bar_active = f"v_lane_{row_index}_{k}_bar_active"
                 filters.append(
                     f"{cur}drawbox=x=24:y={y_dot}:w={target_width - 84}:h=8:"
-                    f"color=yellow@0.55:t=fill:"
+                    f"color={overlay_cfg.active_bar_color}:t=fill:"
                     f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
                     f"[{out_bar_active}]"
                 )
                 cur = f"[{out_bar_active}]"
                 filters.append(
                     f"{cur}drawbox=x={target_width - 60}:y={y_dot}:w=18:h=18:"
-                    f"color=red@1.0:t=fill:"
+                    f"color={overlay_cfg.dot_color}:t=fill:"
                     f"enable='between(t,{dot_start:.3f},{dot_end:.3f})'"
                     f"[{out_tag2}]"
                 )

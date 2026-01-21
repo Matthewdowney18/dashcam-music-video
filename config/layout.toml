@@ -1,0 +1,7 @@
+[overlay]
+base_bar_color = "white@0.25"
+active_bar_color = "yellow@0.85"
+dot_color = "red@1.0"
+dot_window_sec = 0.15
+show_lane_headers = true
+show_event_text = true

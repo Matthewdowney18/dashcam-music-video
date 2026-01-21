@@ -1,0 +1,6 @@
+# Pipeline config paths (override if using non-default locations).
+
+lanes_path = "config/lanes.toml"
+scoring_path = "config/scoring.toml"
+layout_path = "config/layout.toml"
+detection_path = "config/detection.toml"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,11 +7,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .audio_events import detect_audio_events_for_clip
 from .motion_events import detect_motion_events, detect_optical_flow
-
-try:
-    import tomllib
-except Exception:  # pragma: no cover - fallback when tomllib unavailable
-    tomllib = None
+from .config_loader import ConfigLoader
+from .detection_profiles import (
+    MotionEventDetectConfig,
+    OpticalFlowDetectConfig,
+    get_flow_profile,
+    get_motion_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,8 @@ class LaneSpec:
     enabled: bool
     detector: str
     camera: str
+    profile: Optional[str]
+    model: Optional[str]
     params: Dict[str, object]
 
 
@@ -48,6 +51,7 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
         "enabled": True,
         "detector": "motion",
         "camera": "road",
+        "profile": "legacy_meanstd",
         "params": {
             "downscale_width": 320,
             "frame_step": 2,
@@ -64,6 +68,7 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
         "enabled": True,
         "detector": "motion",
         "camera": "cabin",
+        "profile": "legacy_meanstd",
         "params": {
             "downscale_width": 320,
             "frame_step": 2,
@@ -80,6 +85,7 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
         "enabled": True,
         "detector": "audio",
         "camera": "road",
+        "profile": "default",
         "params": {
             "sample_rate": 16000,
             "k": 1.8,
@@ -95,6 +101,7 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
         "enabled": True,
         "detector": "optical_flow",
         "camera": "road",
+        "profile": "legacy_percentile",
         "params": {
             "downscale_width": 320,
             "frame_step": 2,
@@ -108,6 +115,7 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
         "enabled": True,
         "detector": "optical_flow",
         "camera": "cabin",
+        "profile": "legacy_percentile",
         "params": {
             "downscale_width": 320,
             "frame_step": 2,
@@ -121,12 +129,40 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
         "enabled": True,
         "detector": "score",
         "camera": "both",
-        "params": {
-            "sources": ["motion_road", "motion_cabin", "audio"],
-            "weights": {"motion_road": 0.4, "motion_cabin": 0.3, "audio": 0.3},
-        },
+        "model": "weighted_union",
+        "params": {},
     },
 ]
+
+DEFAULT_SCORING_MODELS: Dict[str, Dict[str, object]] = {
+    "weighted_union": {
+        "sources": ["motion_road", "motion_cabin", "audio"],
+        "weights": {"motion_road": 0.4, "motion_cabin": 0.3, "audio": 0.3},
+        "normalize": "sum",
+        "peak_strategy": "best_weighted",
+        "merge_overlaps": True,
+    }
+}
+
+
+def _parse_scoring_models(data: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    models = data.get("model") if isinstance(data, dict) else None
+    if not isinstance(models, dict) or not models:
+        return DEFAULT_SCORING_MODELS
+    return {str(k): dict(v) for k, v in models.items()}
+
+
+def _parse_detection_overrides(
+    data: Dict[str, object],
+) -> Dict[str, Dict[str, Dict[str, object]]]:
+    if not isinstance(data, dict):
+        return {"motion": {}, "flow": {}}
+    motion = data.get("motion") if isinstance(data.get("motion"), dict) else {}
+    flow = data.get("flow") if isinstance(data.get("flow"), dict) else {}
+    return {
+        "motion": {str(k): dict(v) for k, v in motion.items()},
+        "flow": {str(k): dict(v) for k, v in flow.items()},
+    }
 
 
 def _merge_overlapping(events: List[OverlayEvent]) -> List[OverlayEvent]:
@@ -181,6 +217,37 @@ def _build_union_windows(*lanes: List[OverlayEvent]) -> List[Tuple[float, float]
             cs, ce = s, e
     out.append((cs, ce))
     return out
+
+
+def _validate_lane_keys(specs: List[LaneSpec]) -> None:
+    seen: Dict[str, int] = {}
+    for spec in specs:
+        seen[spec.key] = seen.get(spec.key, 0) + 1
+    dupes = [k for k, v in seen.items() if v > 1]
+    if dupes:
+        dupes_str = ", ".join(sorted(dupes))
+        raise ValueError(f"Lane keys must be unique. Duplicates: {dupes_str}")
+
+
+def _validate_score_model(
+    model_name: str,
+    model_cfg: Dict[str, object],
+    lane_keys: List[str],
+) -> None:
+    src_keys = [str(k) for k in model_cfg.get("sources", [])]
+    if not src_keys:
+        raise ValueError(f"Score model {model_name!r} must define sources.")
+    missing = [k for k in src_keys if k not in lane_keys]
+    if missing:
+        missing_str = ", ".join(sorted(missing))
+        raise ValueError(f"Score model {model_name!r} references unknown lanes: {missing_str}")
+    weights_raw = dict(model_cfg.get("weights", {}) or {})
+    extra_weights = [k for k in weights_raw.keys() if str(k) not in src_keys]
+    if extra_weights:
+        extra_str = ", ".join(sorted([str(k) for k in extra_weights]))
+        raise ValueError(
+            f"Score model {model_name!r} has weight keys not in sources: {extra_str}"
+        )
 
 
 def _lane_strength_in_window(lane: List[OverlayEvent], start: float, end: float) -> float:
@@ -249,32 +316,14 @@ def _compute_score_events(
     return _merge_overlapping(score_events)
 
 
-def _load_lane_specs(config_path: Optional[Path]) -> List[LaneSpec]:
-    base_dir = Path(__file__).resolve().parents[1]
-    candidates = []
-    if config_path is not None:
-        candidates.append(Path(config_path))
-    else:
-        candidates.append(base_dir / "config" / "conicals.toml")
-        candidates.append(base_dir / "conicals.toml")
-        candidates.append(base_dir / "config" / "conicals.json")
-        candidates.append(base_dir / "conicals.json")
-
-    data = None
-    for path in candidates:
-        if not path.exists():
-            continue
-        if path.suffix == ".toml" and tomllib is not None:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-            break
-        if path.suffix == ".json":
-            data = json.loads(path.read_text(encoding="utf-8"))
-            break
-
-    if data is None:
+def _load_lane_specs(
+    lanes_data: Dict[str, object],
+    legacy_config: bool,
+) -> List[LaneSpec]:
+    if not lanes_data:
         raw_specs = DEFAULT_LANE_SPECS
     else:
-        raw_specs = data.get("lane") or data.get("lanes") or []
+        raw_specs = lanes_data.get("lane") or lanes_data.get("lanes") or []
 
     specs: List[LaneSpec] = []
     for raw in raw_specs:
@@ -283,11 +332,24 @@ def _load_lane_specs(config_path: Optional[Path]) -> List[LaneSpec]:
         detector = str(raw.get("detector", "")).strip()
         enabled = bool(raw.get("enabled", True))
         camera = str(raw.get("camera", "both")).strip()
+        profile = raw.get("profile")
+        model = raw.get("model")
         params = dict(raw.get("params", {}) or {})
         if not key or not title or not detector:
             continue
         if camera not in {"road", "cabin", "both"}:
             camera = "both"
+        if profile is not None:
+            profile = str(profile).strip() or None
+        if model is not None:
+            model = str(model).strip() or None
+        if profile is None and legacy_config:
+            if detector == "motion":
+                profile = "legacy_meanstd"
+            elif detector == "optical_flow":
+                profile = "legacy_percentile"
+            elif detector == "audio":
+                profile = "default"
         specs.append(
             LaneSpec(
                 key=key,
@@ -295,9 +357,12 @@ def _load_lane_specs(config_path: Optional[Path]) -> List[LaneSpec]:
                 enabled=enabled,
                 detector=detector,
                 camera=camera,
+                profile=profile,
+                model=model,
                 params=params,
             )
         )
+    _validate_lane_keys(specs)
     return specs
 
 
@@ -326,26 +391,45 @@ def _camera_allowed(spec_camera: str, detect_camera: str) -> bool:
     return spec_camera in {detect_camera, "both"}
 
 
-def _build_motion_lane(spec: LaneSpec, road: Path, cabin: Path, detect_camera: str) -> List[OverlayEvent]:
+def _resolve_motion_config(
+    spec: LaneSpec,
+    detection_overrides: Dict[str, Dict[str, Dict[str, object]]],
+) -> MotionEventDetectConfig:
+    profile_name = spec.profile or "default"
+    profile_cfg = get_motion_profile(profile_name)
+    profile_override = detection_overrides.get("motion", {}).get(profile_name, {})
+    profile_cfg = MotionEventDetectConfig.from_dict(profile_override, base=profile_cfg)
+    return MotionEventDetectConfig.from_dict(spec.params, base=profile_cfg)
+
+
+def _resolve_flow_config(
+    spec: LaneSpec,
+    detection_overrides: Dict[str, Dict[str, Dict[str, object]]],
+) -> OpticalFlowDetectConfig:
+    profile_name = spec.profile or "default"
+    profile_cfg = get_flow_profile(profile_name)
+    profile_override = detection_overrides.get("flow", {}).get(profile_name, {})
+    profile_cfg = OpticalFlowDetectConfig.from_dict(profile_override, base=profile_cfg)
+    return OpticalFlowDetectConfig.from_dict(spec.params, base=profile_cfg)
+
+
+def _build_motion_lane(
+    spec: LaneSpec,
+    road: Path,
+    cabin: Path,
+    detect_camera: str,
+    detection_overrides: Dict[str, Dict[str, Dict[str, object]]],
+) -> List[OverlayEvent]:
     if not _camera_allowed(spec.camera, detect_camera):
         return []
-    params = spec.params
+    cfg = _resolve_motion_config(spec, detection_overrides)
     if spec.camera == "cabin":
         path = cabin
     elif spec.camera == "road":
         path = road
     else:
         path = road
-    events = detect_motion_events(
-        video_path=path,
-        downscale_width=int(params.get("downscale_width", 320)),
-        frame_step=int(params.get("frame_step", 2)),
-        pre_event_sec=float(params.get("pre_event_sec", 3.0)),
-        post_event_sec=float(params.get("post_event_sec", 5.0)),
-        min_event_gap_sec=float(params.get("min_event_gap_sec", 5.0)),
-        threshold_std=float(params.get("threshold_std", 2.0)),
-        max_events=int(params.get("max_events", 20)),
-    )
+    events = detect_motion_events(video_path=path, config=cfg)
     strengths = _normalize_strength([float(e.score) for e in events])
     lane_events = [
         OverlayEvent(float(e.start_time), float(e.end_time), float(e.peak_time), spec.title, strengths[i])
@@ -376,15 +460,22 @@ def _build_audio_lane(spec: LaneSpec, road: Path, cabin: Path, detect_camera: st
     return _merge_overlapping(lane_events)
 
 
-def _build_score_lane(spec: LaneSpec, sources: Dict[str, List[OverlayEvent]]) -> List[OverlayEvent]:
-    src_keys = list(spec.params.get("sources", []))
+def _build_score_lane(
+    spec: LaneSpec,
+    sources: Dict[str, List[OverlayEvent]],
+    model_cfg: Dict[str, object],
+) -> List[OverlayEvent]:
+    src_keys = [str(k) for k in model_cfg.get("sources", [])]
     if not src_keys:
         return []
-    weights_raw = dict(spec.params.get("weights", {}) or {})
-    total_w = 0.0
+    weights_raw = dict(model_cfg.get("weights", {}) or {})
+    normalize = str(model_cfg.get("normalize", "sum")).strip().lower()
+    peak_strategy = str(model_cfg.get("peak_strategy", "best_weighted")).strip().lower()
+    merge_overlaps = bool(model_cfg.get("merge_overlaps", True))
+
+    weights: Dict[str, float] = {}
     for k in src_keys:
-        total_w += float(weights_raw.get(k, 1.0))
-    total_w = total_w if total_w > 0 else 1.0
+        weights[k] = float(weights_raw.get(k, 1.0))
 
     lanes = [sources.get(k, []) for k in src_keys]
     windows = _build_union_windows(*lanes)
@@ -395,14 +486,30 @@ def _build_score_lane(spec: LaneSpec, sources: Dict[str, List[OverlayEvent]]) ->
         score = 0.0
         for k in src_keys:
             lane = sources.get(k, [])
-            w = float(weights_raw.get(k, 1.0))
+            w = weights.get(k, 1.0)
             strength = _lane_strength_in_window(lane, s, e)
             score += w * strength
-            if strength * w > best_strength:
-                best_strength = strength * w
+            weighted_strength = strength * w if peak_strategy == "best_weighted" else strength
+            if weighted_strength > best_strength:
+                best_strength = weighted_strength
                 best_peak = _best_peak_time_in_window(lane, s, e)
-        score = max(0.0, min(1.0, score / total_w))
-        peak = best_peak if best_peak is not None else (s + e) / 2.0
+
+        if normalize == "sum":
+            total_w = sum(weights.values()) or 1.0
+            score = score / total_w
+        elif normalize == "max":
+            max_w = max(weights.values()) if weights else 1.0
+            score = score / (max_w or 1.0)
+        elif normalize == "none":
+            pass
+        else:
+            raise ValueError(f"Unknown normalize mode {normalize!r} for score model {spec.model!r}")
+
+        score = max(0.0, min(1.0, score))
+        if peak_strategy == "middle":
+            peak = (s + e) / 2.0
+        else:
+            peak = best_peak if best_peak is not None else (s + e) / 2.0
         score_events.append(
             OverlayEvent(
                 start=s,
@@ -412,26 +519,26 @@ def _build_score_lane(spec: LaneSpec, sources: Dict[str, List[OverlayEvent]]) ->
                 strength01=score,
             )
         )
-    return _merge_overlapping(score_events)
+    return _merge_overlapping(score_events) if merge_overlaps else score_events
 
 
-def _build_optical_flow_lane(spec: LaneSpec, road: Path, cabin: Path, detect_camera: str) -> List[OverlayEvent]:
+def _build_optical_flow_lane(
+    spec: LaneSpec,
+    road: Path,
+    cabin: Path,
+    detect_camera: str,
+    detection_overrides: Dict[str, Dict[str, Dict[str, object]]],
+) -> List[OverlayEvent]:
     if not _camera_allowed(spec.camera, detect_camera):
         return []
-    params = spec.params
+    cfg = _resolve_flow_config(spec, detection_overrides)
     if spec.camera == "cabin":
         path = cabin
     elif spec.camera == "road":
         path = road
     else:
         path = road
-    segments = detect_optical_flow(
-        video_path=path,
-        downscale_width=int(params.get("downscale_width", 320)),
-        frame_step=int(params.get("frame_step", 2)),
-        min_duration_sec=float(params.get("min_duration_sec", 2.0)),
-        flow_percentile=float(params.get("flow_percentile", 60.0)),
-    )
+    segments = detect_optical_flow(video_path=path, config=cfg)
     strengths = _normalize_strength([float(s.mean_flow) for s in segments])
     lane_events = [
         OverlayEvent(
@@ -453,11 +560,28 @@ def build_conical_lanes(
     max_duration: Optional[float] = None,
     config_path: Optional[Path] = None,
 ) -> List[Lane]:
-    specs = _load_lane_specs(config_path)
+    loader = ConfigLoader.from_env()
+    if config_path is not None:
+        config_path = Path(config_path).resolve()
+        loader = ConfigLoader(repo_root=loader.repo_root, config_dir=config_path.parent)
+
+    lanes_data = loader.load_lanes()
+    lanes_path = loader.config_dir / "lanes.toml"
+    legacy_path = loader.config_dir / "conicals.toml"
+    legacy_config = (not lanes_path.exists()) and legacy_path.exists()
+    specs = _load_lane_specs(lanes_data, legacy_config)
+
+    scoring_models = _parse_scoring_models(loader.load_scoring())
+    detection_overrides = _parse_detection_overrides(loader.load_detection_overrides())
+    lane_keys = [spec.key for spec in specs if spec.detector != "score"]
     registry: Dict[str, Callable[[LaneSpec], List[OverlayEvent]]] = {
-        "motion": lambda spec: _build_motion_lane(spec, road, cabin, detect_camera),
+        "motion": lambda spec: _build_motion_lane(
+            spec, road, cabin, detect_camera, detection_overrides
+        ),
         "audio": lambda spec: _build_audio_lane(spec, road, cabin, detect_camera),
-        "optical_flow": lambda spec: _build_optical_flow_lane(spec, road, cabin, detect_camera),
+        "optical_flow": lambda spec: _build_optical_flow_lane(
+            spec, road, cabin, detect_camera, detection_overrides
+        ),
     }
 
     built: Dict[str, List[OverlayEvent]] = {}
@@ -473,7 +597,15 @@ def build_conical_lanes(
     for spec in specs:
         if not spec.enabled or spec.detector != "score":
             continue
-        built[spec.key] = _clip_lane(_build_score_lane(spec, built), max_duration)
+        model_name = spec.model or "weighted_union"
+        model_cfg = scoring_models.get(model_name)
+        if model_cfg is None:
+            valid = ", ".join(sorted(scoring_models.keys()))
+            raise ValueError(f"Unknown scoring model {model_name!r}. Valid: {valid}")
+        _validate_score_model(model_name, model_cfg, lane_keys)
+        built[spec.key] = _clip_lane(
+            _build_score_lane(spec, built, model_cfg), max_duration
+        )
 
     lanes: List[Lane] = []
     for spec in specs:

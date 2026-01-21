@@ -1,0 +1,17 @@
+# Optional profile overrides for motion/flow detection.
+# Keys should match profile names from src/detection_profiles.py.
+
+[motion.default]
+# threshold_mode = "robust_global"
+# threshold_std = 5.0
+# smoothing_mode = "median"
+
+[motion.legacy_meanstd]
+# threshold_std = 2.0
+
+[flow.default]
+# flow_percentile = 80.0
+# abs_threshold = 0.01
+
+[flow.legacy_percentile]
+# flow_percentile = 60.0

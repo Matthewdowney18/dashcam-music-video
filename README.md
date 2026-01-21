@@ -53,6 +53,18 @@ python -m src.run --base-dir "$BASE" layout --index 7 --out output/test.mp4
 
 ---
 
+## Configuration
+Runtime-tunable settings live only in `./config/*.toml`:
+- `config/lanes.toml`: lane registry for motion/audio/flow/score (falls back to `config/conicals.toml`)
+- `config/scoring.toml`: scoring model definitions (e.g., `weighted_union`)
+- `config/layout.toml`: overlay colors, dot timing, and label toggles
+- `config/detection.toml`: optional per-profile overrides for motion/flow defaults
+- `config/pipeline.toml`: config file paths (optional)
+
+Profiles referenced by lanes are defined in `src/detection_profiles.py`.
+
+---
+
 ## Output Artifacts
 - Vertical MP4 videos
 - Canonical event JSON files

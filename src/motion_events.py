@@ -32,6 +32,8 @@ from typing import List
 import cv2
 import numpy as np
 
+from .detection_profiles import MotionEventDetectConfig, OpticalFlowDetectConfig
+
 from .ingest import DashcamConfig, discover_pairs
 
 
@@ -56,12 +58,102 @@ class SmoothSegment:
     start_time: float  # seconds
     end_time: float    # seconds
     mean_flow: float   # average optical flow magnitude over segment
+    peak_flow: float | None = None  # peak flow magnitude over segment
 
     def __str__(self) -> str:
+        peak = "" if self.peak_flow is None else f", peak_flow={self.peak_flow:.3f}"
         return (
             f"{self.start_time:6.2f}s → {self.end_time:6.2f}s "
-            f"(mean_flow={self.mean_flow:.3f})"
+            f"(mean_flow={self.mean_flow:.3f}{peak})"
         )
+
+
+def _ensure_odd(n: int) -> int:
+    return n if n % 2 == 1 else n + 1
+
+
+def _smooth_signal(signal: np.ndarray, mode: str, kernel: int, ema_alpha: float) -> np.ndarray:
+    if mode == "none":
+        return signal
+    if mode == "ema":
+        out = np.empty_like(signal)
+        alpha = float(ema_alpha)
+        out[0] = signal[0]
+        for i in range(1, len(signal)):
+            out[i] = alpha * signal[i] + (1.0 - alpha) * out[i - 1]
+        return out
+    if mode == "median":
+        k = _ensure_odd(int(kernel))
+        pad = k // 2
+        padded = np.pad(signal, (pad, pad), mode="edge")
+        out = np.empty_like(signal)
+        for i in range(len(signal)):
+            out[i] = float(np.median(padded[i:i + k]))
+        return out
+    return signal
+
+
+def _mad(arr: np.ndarray) -> float:
+    med = float(np.median(arr))
+    return float(np.median(np.abs(arr - med)))
+
+
+def _robust_threshold_global(signal: np.ndarray, k: float) -> float:
+    med = float(np.median(signal))
+    mad = _mad(signal) * 1.4826
+    return med + k * mad
+
+
+def _robust_threshold_rolling(signal: np.ndarray, window_samples: int, k: float) -> np.ndarray:
+    w = max(1, int(window_samples))
+    out = np.empty_like(signal)
+    for i in range(len(signal)):
+        start = max(0, i - w + 1)
+        window = signal[start:i + 1]
+        med = float(np.median(window))
+        mad = _mad(window) * 1.4826
+        out[i] = med + k * mad
+    return out
+
+
+def _apply_hysteresis(signal: np.ndarray, high_thr: np.ndarray | float, low_ratio: float) -> np.ndarray:
+    if np.isscalar(high_thr):
+        high = float(high_thr)
+        low = high * float(low_ratio)
+        active = False
+        mask = np.zeros_like(signal, dtype=bool)
+        for i, v in enumerate(signal):
+            if not active and v >= high:
+                active = True
+            elif active and v <= low:
+                active = False
+            mask[i] = active
+        return mask
+    high = np.asarray(high_thr)
+    low = high * float(low_ratio)
+    active = False
+    mask = np.zeros_like(signal, dtype=bool)
+    for i, v in enumerate(signal):
+        if not active and v >= high[i]:
+            active = True
+        elif active and v <= low[i]:
+            active = False
+        mask[i] = active
+    return mask
+
+
+def _find_runs(mask: np.ndarray) -> List[tuple[int, int]]:
+    runs: List[tuple[int, int]] = []
+    start = None
+    for i, val in enumerate(mask):
+        if val and start is None:
+            start = i
+        elif not val and start is not None:
+            runs.append((start, i - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(mask) - 1))
+    return runs
 
 
 def detect_motion_events(
@@ -73,7 +165,8 @@ def detect_motion_events(
     min_event_gap_sec: float = 5.0,
     threshold_std: float = 2.0,
     max_events: int = 20,
-) -> List[MotionEvent]:
+    config: MotionEventDetectConfig | dict | None = None,
+) -> List[MotionEvent] | tuple[List[MotionEvent], dict]:
     """
     Basic motion-spike detector on a single video.
 
@@ -84,11 +177,28 @@ def detect_motion_events(
     - threshold_std: how many std dev above mean to call something a spike.
     - max_events: keep strongest N events.
     """
+    base_cfg = MotionEventDetectConfig(
+        downscale_width=downscale_width,
+        frame_step=frame_step,
+        pre_event_sec=pre_event_sec,
+        post_event_sec=post_event_sec,
+        min_event_gap_sec=min_event_gap_sec,
+        threshold_std=threshold_std,
+        max_events=max_events,
+    )
+    if config is None:
+        cfg = base_cfg
+    elif isinstance(config, MotionEventDetectConfig):
+        cfg = MotionEventDetectConfig.from_dict(config.__dict__, base=base_cfg)
+    else:
+        cfg = MotionEventDetectConfig.from_dict(config, base=base_cfg)
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
     print(f"[motion] Analyzing {video_path.name} at {fps:.2f} fps")
 
     prev_gray = None
@@ -101,14 +211,14 @@ def detect_motion_events(
         if not ret:
             break
 
-        if frame_idx % frame_step != 0:
+        if frame_idx % cfg.frame_step != 0:
             frame_idx += 1
             continue
 
         # Downscale
         h, w = frame.shape[:2]
-        scale = downscale_width / float(w)
-        new_size = (downscale_width, int(h * scale))
+        scale = cfg.downscale_width / float(w)
+        new_size = (cfg.downscale_width, int(h * scale))
         frame_small = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
 
         gray = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
@@ -131,57 +241,109 @@ def detect_motion_events(
     cap.release()
 
     if not scores:
-        return []
+        return [] if not cfg.return_debug else ([], {"reason": "no_scores"})
 
     scores_arr = np.array(scores)
     times_arr = np.array(times)
+    duration_s = (float(total_frames) / fps) if total_frames > 0 else float(times_arr[-1])
+    dt_sec = (float(cfg.frame_step) / fps) if fps and np.isfinite(fps) else 0.0
+    dt_sec = (float(cfg.frame_step) / fps) if fps and np.isfinite(fps) else 0.0
+    dt_sec = (float(cfg.frame_step) / fps) if fps and np.isfinite(fps) else 0.0
+    dt_sec = (float(cfg.frame_step) / fps) if fps and np.isfinite(fps) else 0.0
 
-    mean = scores_arr.mean()
-    std = scores_arr.std() or 1e-6
-    threshold = mean + threshold_std * std
-
-    print(
-        f"[motion] mean={mean:.3f}, std={std:.3f}, "
-        f"threshold={threshold:.3f}"
+    smooth = _smooth_signal(
+        scores_arr,
+        mode=cfg.smoothing_mode,
+        kernel=cfg.smoothing_kernel,
+        ema_alpha=cfg.ema_alpha,
     )
 
-    # Indices where motion score exceeds threshold
-    spike_indices = np.where(scores_arr > threshold)[0]
-    if spike_indices.size == 0:
+    if cfg.threshold_mode == "robust_global":
+        high_thr = _robust_threshold_global(smooth, cfg.threshold_std)
+    elif cfg.threshold_mode == "robust_rolling":
+        window_samples = max(1, int(cfg.rolling_window_sec * (fps / cfg.frame_step)))
+        high_thr = _robust_threshold_rolling(smooth, window_samples, cfg.threshold_std)
+    else:
+        mean = float(smooth.mean())
+        std = float(smooth.std() or 1e-6)
+        high_thr = mean + cfg.threshold_std * std
+        print(
+            f"[motion] mean={mean:.3f}, std={std:.3f}, "
+            f"threshold={high_thr:.3f}"
+        )
+
+    if cfg.hysteresis:
+        mask = _apply_hysteresis(smooth, high_thr, cfg.low_ratio)
+    else:
+        mask = smooth >= high_thr
+
+    runs = _find_runs(mask)
+    if not runs:
         print("[motion] No spikes above threshold.")
-        return []
+        return [] if not cfg.return_debug else ([], {"raw": scores_arr, "smooth": smooth, "thr": high_thr, "mask": mask})
 
-    events: List[MotionEvent] = []
-    last_event_end = -1e9
-
-    for idx in spike_indices:
-        peak_t = float(times_arr[idx])
-        if peak_t < last_event_end + min_event_gap_sec:
-            # too close to previous event
-            continue
-
-        start_t = max(0.0, peak_t - pre_event_sec)
-        end_t = peak_t + post_event_sec
-
-        events.append(
+    candidates: List[MotionEvent] = []
+    for (s_idx, e_idx) in runs:
+        run_scores = scores_arr[s_idx:e_idx + 1]
+        peak_rel = int(np.argmax(run_scores))
+        peak_idx = s_idx + peak_rel
+        peak_score = float(scores_arr[peak_idx])
+        peak_t = float(times_arr[peak_idx])
+        start_t = max(0.0, peak_t - cfg.pre_event_sec)
+        end_t = min(duration_s, peak_t + cfg.post_event_sec)
+        candidates.append(
             MotionEvent(
                 start_time=start_t,
                 peak_time=peak_t,
                 end_time=end_t,
-                score=float(scores_arr[idx]),
+                score=peak_score,
             )
         )
-        last_event_end = end_t
 
-    # If there are too many events, keep the strongest ones
-    events_sorted = sorted(events, key=lambda e: e.score, reverse=True)
-    events_sorted = events_sorted[:max_events]
+    # Merge overlapping or near-adjacent windows
+    candidates.sort(key=lambda e: e.start_time)
+    merged: List[MotionEvent] = []
+    for ev in candidates:
+        if not merged:
+            merged.append(ev)
+            continue
+        last = merged[-1]
+        if ev.start_time <= last.end_time + cfg.merge_gap_sec:
+            best = ev if ev.score > last.score else last
+            merged[-1] = MotionEvent(
+                start_time=min(last.start_time, ev.start_time),
+                peak_time=best.peak_time,
+                end_time=max(last.end_time, ev.end_time),
+                score=best.score,
+            )
+        else:
+            merged.append(ev)
 
-    # Sort chronologically for readability
-    events_sorted = sorted(events_sorted, key=lambda e: e.start_time)
+    # Keep strongest N, then sort chronologically
+    merged_sorted = sorted(merged, key=lambda e: e.score, reverse=True)[: cfg.max_events]
+    merged_sorted = sorted(merged_sorted, key=lambda e: e.start_time)
 
-    print(f"[motion] Detected {len(events_sorted)} motion events.")
-    return events_sorted
+    # Final prune for compatibility with min_event_gap_sec
+    pruned: List[MotionEvent] = []
+    last_peak = -1e9
+    for ev in merged_sorted:
+        if ev.peak_time < last_peak + cfg.min_event_gap_sec:
+            continue
+        pruned.append(ev)
+        last_peak = ev.peak_time
+
+    print(f"[motion] Detected {len(pruned)} motion events.")
+    if cfg.return_debug:
+        # thr uses threshold_std as k for robust modes.
+        debug = {
+            "raw": scores_arr,
+            "smooth": smooth,
+            "thr": high_thr,
+            "mask": mask,
+            "times": times_arr,
+        }
+        return pruned, debug
+    return pruned
 
 
 def detect_optical_flow(
@@ -190,7 +352,8 @@ def detect_optical_flow(
     frame_step: int = 2,
     min_duration_sec: float = 2.0,
     flow_percentile: float = 60.0,
-) -> List[SmoothSegment]:
+    config: OpticalFlowDetectConfig | dict | None = None,
+) -> List[SmoothSegment] | tuple[List[SmoothSegment], dict]:
     """
     Detect segments of sustained motion using only optical-flow magnitude.
 
@@ -203,11 +366,25 @@ def detect_optical_flow(
     - Group consecutive frames above threshold into segments of at least
       `min_duration_sec`.
     """
+    base_cfg = OpticalFlowDetectConfig(
+        downscale_width=downscale_width,
+        frame_step=frame_step,
+        min_duration_sec=min_duration_sec,
+        flow_percentile=flow_percentile,
+    )
+    if config is None:
+        cfg = base_cfg
+    elif isinstance(config, OpticalFlowDetectConfig):
+        cfg = OpticalFlowDetectConfig.from_dict(config.__dict__, base=base_cfg)
+    else:
+        cfg = OpticalFlowDetectConfig.from_dict(config, base=base_cfg)
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
 
     prev_gray = None
     times: List[float] = []
@@ -219,13 +396,13 @@ def detect_optical_flow(
         if not ret:
             break
 
-        if frame_idx % frame_step != 0:
+        if frame_idx % cfg.frame_step != 0:
             frame_idx += 1
             continue
 
         h, w = frame.shape[:2]
-        scale = downscale_width / float(w)
-        new_size = (downscale_width, int(h * scale))
+        scale = cfg.downscale_width / float(w)
+        new_size = (cfg.downscale_width, int(h * scale))
         frame_small = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
 
         gray = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
@@ -254,52 +431,116 @@ def detect_optical_flow(
 
     if not mag_means:
         print("[smooth] No frames processed.")
-        return []
+        return [] if not cfg.return_debug else ([], {"reason": "no_frames"})
 
     times_arr = np.array(times)
     mag_arr = np.array(mag_means)
+    duration_s = (float(total_frames) / fps) if total_frames > 0 else float(times_arr[-1])
+    dt_sec = (float(cfg.frame_step) / fps) if fps and np.isfinite(fps) else 0.0
 
-    thr = np.percentile(mag_arr, flow_percentile)
-    print(
-        f"[smooth] mean_flow={mag_arr.mean():.3f}, "
-        f"threshold(p{flow_percentile})={thr:.3f}"
+    smooth = _smooth_signal(
+        mag_arr,
+        mode=cfg.smoothing_mode,
+        kernel=cfg.smoothing_kernel,
+        ema_alpha=cfg.ema_alpha,
     )
 
-    moving_mask = mag_arr >= thr
+    if cfg.threshold_mode == "robust_global":
+        thr = _robust_threshold_global(smooth, 1.0)
+    elif cfg.threshold_mode == "robust_rolling":
+        window_samples = max(1, int(cfg.rolling_window_sec * (fps / cfg.frame_step)))
+        thr = _robust_threshold_rolling(smooth, window_samples, 1.0)
+    else:
+        thr = float(np.percentile(smooth, cfg.flow_percentile))
 
+    if np.isscalar(thr):
+        thr_eff = max(float(thr), cfg.abs_threshold)
+    else:
+        thr_eff = np.maximum(thr, cfg.abs_threshold)
+
+    if cfg.hysteresis:
+        moving_mask = _apply_hysteresis(smooth, thr_eff, cfg.low_ratio)
+    else:
+        moving_mask = smooth >= thr_eff
+
+    runs = _find_runs(moving_mask)
     segments: List[SmoothSegment] = []
-    start_idx = None
+    for (s_idx, e_idx) in runs:
+        start_t = float(times_arr[s_idx])
+        end_t = float(times_arr[e_idx])
+        run_duration = (end_t - start_t) + dt_sec
+        if run_duration < cfg.min_duration_sec:
+            continue
+        if cfg.pad_sec > 0:
+            start_t = max(0.0, start_t - cfg.pad_sec)
+            end_t = min(duration_s, end_t + cfg.pad_sec)
+        segments.append(
+            SmoothSegment(
+                start_time=start_t,
+                end_time=end_t,
+                mean_flow=0.0,
+                peak_flow=0.0,
+            )
+        )
 
-    def flush_segment(end_idx: int):
-        nonlocal start_idx
-        if start_idx is None:
-            return
-        start_t = float(times_arr[start_idx])
-        end_t = float(times_arr[end_idx])
-        if end_t - start_t >= min_duration_sec:
-            mean_flow = float(mag_arr[start_idx:end_idx + 1].mean())
-            segments.append(
+    # Merge segments with small gaps
+    segments.sort(key=lambda s: s.start_time)
+    merged: List[SmoothSegment] = []
+    for seg in segments:
+        if not merged:
+            merged.append(seg)
+            continue
+        last = merged[-1]
+        if seg.start_time <= last.end_time + cfg.merge_gap_sec:
+            merged[-1] = SmoothSegment(
+                start_time=max(0.0, min(last.start_time, seg.start_time)),
+                end_time=min(duration_s, max(last.end_time, seg.end_time)),
+                mean_flow=0.0,
+                peak_flow=0.0,
+            )
+        else:
+            merged.append(
                 SmoothSegment(
-                    start_time=start_t,
-                    end_time=end_t,
-                    mean_flow=mean_flow,
+                    start_time=max(0.0, seg.start_time),
+                    end_time=min(duration_s, seg.end_time),
+                    mean_flow=0.0,
+                    peak_flow=0.0,
                 )
             )
-        start_idx = None
 
-    for i, is_moving in enumerate(moving_mask):
-        if is_moving:
-            if start_idx is None:
-                start_idx = i
+    # Recompute stats on merged spans
+    final_segments: List[SmoothSegment] = []
+    for seg in merged:
+        start_t = max(0.0, seg.start_time)
+        end_t = min(duration_s, seg.end_time)
+        idx = np.where((times_arr >= start_t) & (times_arr <= end_t))[0]
+        if idx.size == 0:
+            mean_flow = 0.0
+            peak_flow = 0.0
         else:
-            if start_idx is not None:
-                flush_segment(i - 1)
+            mean_flow = float(mag_arr[idx].mean())
+            peak_flow = float(mag_arr[idx].max())
+        final_segments.append(
+            SmoothSegment(
+                start_time=start_t,
+                end_time=end_t,
+                mean_flow=mean_flow,
+                peak_flow=peak_flow,
+            )
+        )
 
-    if start_idx is not None:
-        flush_segment(len(moving_mask) - 1)
-
-    print(f"[smooth] Detected {len(segments)} smooth segments.")
-    return segments
+    print(f"[smooth] Detected {len(final_segments)} smooth segments.")
+    if cfg.return_debug:
+        # thr uses robust median+MAD (k=1.0) or percentile depending on mode.
+        debug = {
+            "raw": mag_arr,
+            "smooth": smooth,
+            "thr": thr_eff,
+            "mask": moving_mask,
+            "times": times_arr,
+        }
+        return final_segments, debug
+    return final_segments
 
 
 # ---------------------------------------------------------------------------
