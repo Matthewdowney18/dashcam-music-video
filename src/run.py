@@ -38,6 +38,13 @@ from .types.adapters import motion_events_to_canonical, audio_events_to_canonica
 
 
 def _get_pair(base_dir: Path, index: int):
+    """
+    Resolve a single paired clip by index from the ingest catalog.
+
+    Raises:
+        RuntimeError: no pairs found in the base directory.
+        IndexError: index is out of range for discovered pairs.
+    """
     cfg = DashcamConfig(base_dir=base_dir)
     pairs = discover_pairs(cfg)
     if not pairs:
@@ -48,6 +55,9 @@ def _get_pair(base_dir: Path, index: int):
 
 
 def _fmt_events(events: List[object]) -> None:
+    """
+    Print a list of event objects in a compact, line-per-event format.
+    """
     if not events:
         print("  (none)")
         return
@@ -56,6 +66,9 @@ def _fmt_events(events: List[object]) -> None:
 
 
 def _fmt_eventset(es: EventSet) -> None:
+    """
+    Print a validated EventSet with its video_path and per-event details.
+    """
     es = es.validated()
     print(f"  video_path: {es.video_path}")
     if not es.events:
@@ -66,6 +79,9 @@ def _fmt_eventset(es: EventSet) -> None:
 
 
 def _write_eventset_json(es: EventSet, out_path: str) -> None:
+    """
+    Serialize a validated EventSet to JSON on disk.
+    """
     p = Path(out_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8") as f:
@@ -73,6 +89,9 @@ def _write_eventset_json(es: EventSet, out_path: str) -> None:
     print(f"  wrote: {p}")
 
 def _get_last_indices(base_dir: Path, n: int) -> List[int]:
+    """
+    Return indices for the last N paired clips in the ingest catalog.
+    """
     cfg = DashcamConfig(base_dir=base_dir)
     pairs = discover_pairs(cfg)
     if not pairs:
@@ -86,6 +105,10 @@ def _get_last_indices(base_dir: Path, n: int) -> List[int]:
 # -----------------------------
 
 def cmd_captioned_last(args):
+    """
+    Render a batch of the last N pairs using the vertical captioned preset.
+    Outputs are written to a directory with zero-padded index filenames.
+    """
     base_dir = Path(args.base_dir)
     indices = _get_last_indices(base_dir, args.last)
     out_dir = Path(args.out_dir)
@@ -105,6 +128,9 @@ def cmd_captioned_last(args):
         )
 
 def cmd_captioned(args):
+    """
+    Render a single vertical captioned output with overlays.
+    """
     make_vertical_captioned_output_preset(
         base_dir=Path(args.base_dir),
         out_path=Path(args.out),
@@ -115,6 +141,9 @@ def cmd_captioned(args):
     )
 
 def cmd_captioned_panel(args):
+    """
+    Render a vertical stack with a right-side panel for overlays.
+    """
     make_captioned_output_preset(
         base_dir=Path(args.base_dir),
         out_path=Path(args.out),
@@ -128,6 +157,9 @@ def cmd_captioned_panel(args):
     )
 
 def cmd_ingest(args):
+    """
+    Discover and summarize road/cabin pairs in the base directory.
+    """
     cfg = DashcamConfig(
         base_dir=Path(args.base_dir),
         road_dir_name=args.road_dir,
@@ -138,6 +170,10 @@ def cmd_ingest(args):
 
 
 def cmd_motion(args):
+    """
+    Detect motion events on a selected pair (road, cabin, or both).
+    Optionally convert to canonical EventSet and emit JSON.
+    """
     pair = _get_pair(Path(args.base_dir), args.index)
     cams = ["road", "cabin"] if args.camera == "both" else [args.camera]
 
@@ -165,6 +201,10 @@ def cmd_motion(args):
             _fmt_eventset(es)
 
 def cmd_audio(args):
+    """
+    Detect salient audio events on a selected pair.
+    Optionally convert to canonical EventSet, emit JSON, and save debug arrays.
+    """
     pair = _get_pair(Path(args.base_dir), args.index)
     cams = ["road", "cabin"] if args.camera == "both" else [args.camera]
 
@@ -199,6 +239,9 @@ def cmd_audio(args):
 
 
 def cmd_layout(args):
+    """
+    Render a simple stacked layout (road top, cabin bottom) using presets.
+    """
     make_vertical_test_output_preset(
         base_dir=Path(args.base_dir),
         out_path=Path(args.out),
@@ -212,6 +255,18 @@ def cmd_layout(args):
 # -----------------------------
 
 def build_parser():
+    """
+    Build the CLI parser and wire subcommands to their handlers.
+
+    Commands:
+        ingest            List paired clips and basic metadata.
+        motion            Motion spike detection (road/cabin/both).
+        audio             Audio salience detection (road/cabin/both).
+        layout            Vertical stacked render (no panel).
+        captioned         Vertical stacked render with caption band.
+        captioned-panel   Vertical stacked render with right-side panel.
+        captioned-last    Batch render of last N pairs (captioned).
+    """
     p = argparse.ArgumentParser(
         prog="python -m src.run",
         description="Unified dashcam pipeline runner",
@@ -220,12 +275,14 @@ def build_parser():
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # Ingest: enumerate road/cabin pairs and print a summary.
     s = sub.add_parser("ingest")
     s.add_argument("--road-dir", default="DCIMA")
     s.add_argument("--cabin-dir", default="DCIMB")
     s.add_argument("--show", type=int, default=10)
     s.set_defaults(func=cmd_ingest)
 
+    # Motion: run frame-diff detection on road/cabin (or both).
     s = sub.add_parser("motion")
     s.add_argument("--index", type=int, default=0)
     s.add_argument("--camera", choices=["road", "cabin", "both"], default="both")
@@ -240,6 +297,7 @@ def build_parser():
     s.add_argument("--json", help="Write canonical EventSet to this JSON file (requires --canonical)")
     s.set_defaults(func=cmd_motion)
 
+    # Audio: extract salience events and optional debug arrays.
     s = sub.add_parser("audio")
     s.add_argument("--index", type=int, default=0)
     s.add_argument("--camera", choices=["road", "cabin", "both"], default="road")
@@ -254,6 +312,7 @@ def build_parser():
     s.add_argument("--json", help="Write canonical EventSet to this JSON file (requires --canonical)")
     s.set_defaults(func=cmd_audio)
 
+    # Layout: baseline vertical stack (road top, cabin bottom).
     s = sub.add_parser("layout")
     s.add_argument("--index", type=int, default=0)
     s.add_argument("--out", default="output/test_vertical.mp4")
@@ -261,6 +320,7 @@ def build_parser():
     s.add_argument("--preset", default="caption1080")
     s.set_defaults(func=cmd_layout)
 
+    # Captioned: vertical stack with caption band overlays.
     s = sub.add_parser("captioned")
     s.add_argument("--index", type=int, default=0)
     s.add_argument("--out", default="output/captioned.mp4")
@@ -269,6 +329,7 @@ def build_parser():
     s.add_argument("--detect-camera", choices=["road", "cabin"], default="road")
     s.set_defaults(func=cmd_captioned)
 
+    # Captioned panel: adds right-side panel for overlay lanes.
     s = sub.add_parser("captioned-panel")
     s.add_argument("--index", type=int, default=0)
     s.add_argument("--out", default="output/captioned_panel.mp4")
@@ -280,6 +341,7 @@ def build_parser():
     s.add_argument("--detect-camera", choices=["road", "cabin"], default="road")
     s.set_defaults(func=cmd_captioned_panel)
 
+    # Captioned last: batch render last N pairs (useful for quick previews).
     s = sub.add_parser("captioned-last")
     s.add_argument("--last", type=int, default=10)
     s.add_argument("--out-dir", default="output/captioned_last")
@@ -291,6 +353,9 @@ def build_parser():
 
 
 def main():
+    """
+    CLI entry point. Parses args and dispatches to the selected command.
+    """
     args = build_parser().parse_args()
     args.func(args)
 
