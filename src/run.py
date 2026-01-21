@@ -326,7 +326,7 @@ def build_parser():
     s.add_argument("--out", default="output/captioned.mp4")
     s.add_argument("--seconds", type=float, default=60.0)
     s.add_argument("--preset", default="debug720")  # uses caption band
-    s.add_argument("--detect-camera", choices=["road", "cabin"], default="road")
+    s.add_argument("--detect-camera", choices=["road", "cabin", "both"], default="both")
     s.set_defaults(func=cmd_captioned)
 
     # Captioned panel: adds right-side panel for overlay lanes.
@@ -338,7 +338,7 @@ def build_parser():
     s.add_argument("--panel-width", type=int, default=None)
     s.add_argument("--stack-width", type=int, default=None)
     s.add_argument("--quality", choices=["debug", "final"], default="debug")
-    s.add_argument("--detect-camera", choices=["road", "cabin"], default="road")
+    s.add_argument("--detect-camera", choices=["road", "cabin", "both"], default="both")
     s.set_defaults(func=cmd_captioned_panel)
 
     # Captioned last: batch render last N pairs (useful for quick previews).

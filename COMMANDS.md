@@ -105,7 +105,7 @@ python -m src.run --base-dir "$BASE" captioned \
   --out output/captioned_7.mp4 \
   --seconds 10 \
   --preset debug720 \
-  --detect-camera road
+  --detect-camera both
 ```
 
 ---
@@ -113,6 +113,7 @@ python -m src.run --base-dir "$BASE" captioned \
 ## Render Captioned + Side Panel
 Caption band plus a right-side panel for future annotations.
 Defaults: `--quality debug` uses faster encode, smaller panel, and fewer labels.
+Panel rows are rendered from conical lanes (headers + timeline bars, SCORE header only).
 
 ```bash
 python -m src.run --base-dir "$BASE" captioned-panel \
@@ -123,7 +124,7 @@ python -m src.run --base-dir "$BASE" captioned-panel \
   --quality debug \
   --panel-width 420 \
   --stack-width 960 \
-  --detect-camera road
+  --detect-camera both
 ```
 
 Final quality (slower, full labels):
@@ -134,7 +135,7 @@ python -m src.run --base-dir "$BASE" captioned-panel \
   --seconds 10 \
   --preset debug720 \
   --quality final \
-  --detect-camera road
+  --detect-camera both
 ```
 
 ---
