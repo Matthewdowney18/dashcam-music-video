@@ -1,0 +1,32 @@
+[[lane]]
+key = "motion_road"
+title = "MOTION ROAD"
+enabled = true
+detector = "motion"
+camera = "road"
+params = { downscale_width = 320, frame_step = 2, pre_event_sec = 3.0, post_event_sec = 5.0, min_event_gap_sec = 5.0, threshold_std = 2.0, max_events = 20 }
+
+[[lane]]
+key = "motion_cabin"
+title = "MOTION CABIN"
+enabled = true
+detector = "motion"
+camera = "cabin"
+params = { downscale_width = 320, frame_step = 2, pre_event_sec = 3.0, post_event_sec = 5.0, min_event_gap_sec = 5.0, threshold_std = 2.0, max_events = 20 }
+
+[[lane]]
+key = "audio"
+title = "AUDIO"
+enabled = true
+detector = "audio"
+camera = "road"
+params = { sample_rate = 16000, k = 1.8, pre_event_sec = 1.5, post_event_sec = 2.5, min_event_gap_sec = 1.0, max_events = 10 }
+
+[[lane]]
+key = "score"
+title = "SCORE"
+enabled = true
+detector = "score"
+camera = "both"
+params.sources = ["motion_road", "motion_cabin", "audio"]
+params.weights = { motion_road = 0.4, motion_cabin = 0.3, audio = 0.3 }
