@@ -477,22 +477,38 @@ def _make_captioned_output_preset(
                 out_box = f"v_lane_{row_index}_{k}_box"
                 filters.append(
                     f"{cur}drawbox=x={x_start:.2f}:y={timeline_y}:w={w_box:.2f}:h={h_box}:"
-                    f"color=white@0.7:t=fill:"
-                    f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                    f"color=white@0.25:t=fill:enable='1'"
                     f"[{out_box}]"
                 )
                 cur = f"[{out_box}]"
+                out_box_active = f"v_lane_{row_index}_{k}_box_active"
+                filters.append(
+                    f"{cur}drawbox=x={x_start:.2f}:y={timeline_y}:w={w_box:.2f}:h={h_box}:"
+                    f"color=yellow@0.85:t=fill:"
+                    f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                    f"[{out_box_active}]"
+                )
+                cur = f"[{out_box_active}]"
                 if text_events:
                     out_tag = f"v_lane_{row_index}_{k}"
                     safe_label = _escape_drawtext(e.label)
                     filters.append(
                         f"{cur}drawtext=fontfile={fontfile}:"
                         f"text='{safe_label}':x={panel_x0 + margin_x}:y={header_y}:"
-                        f"fontsize={panel_font_size}:fontcolor=white:"
-                        f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                        f"fontsize={panel_font_size}:fontcolor=white@0.85:"
+                        f"enable='1'"
                         f"[{out_tag}]"
                     )
                     cur = f"[{out_tag}]"
+                    out_tag_active = f"v_lane_{row_index}_{k}_active"
+                    filters.append(
+                        f"{cur}drawtext=fontfile={fontfile}:"
+                        f"text='{safe_label}':x={panel_x0 + margin_x}:y={header_y}:"
+                        f"fontsize={panel_font_size}:fontcolor=yellow@1.0:"
+                        f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                        f"[{out_tag_active}]"
+                    )
+                    cur = f"[{out_tag_active}]"
 
                 out_tag2 = f"v_lane_{row_index}_{k}_dot"
                 dot_start = max(0.0, e.peak - 0.15)
@@ -542,15 +558,40 @@ def _make_captioned_output_preset(
                 filters.append(
                     f"{cur}drawtext=fontfile={fontfile}:"
                     f"text='{safe_label}':x=24:y={y_text}:"
-                    f"fontsize={int(row_h*0.55)}:fontcolor=white:"
-                    f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                    f"fontsize={int(row_h*0.55)}:fontcolor=white@0.85:"
+                    f"enable='1'"
                     f"[{out_tag}]"
                 )
                 cur = f"[{out_tag}]"
+                out_tag_active = f"v_lane_{row_index}_{k}_active"
+                filters.append(
+                    f"{cur}drawtext=fontfile={fontfile}:"
+                    f"text='{safe_label}':x=24:y={y_text}:"
+                    f"fontsize={int(row_h*0.55)}:fontcolor=yellow@1.0:"
+                    f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                    f"[{out_tag_active}]"
+                )
+                cur = f"[{out_tag_active}]"
 
                 out_tag2 = f"v_lane_{row_index}_{k}_dot"
                 dot_start = max(0.0, e.peak - 0.15)
                 dot_end = e.peak + 0.15
+                out_bar = f"v_lane_{row_index}_{k}_bar"
+                filters.append(
+                    f"{cur}drawbox=x=24:y={y_dot}:w={target_width - 84}:h=8:"
+                    f"color=white@0.18:t=fill:"
+                    f"enable='1'"
+                    f"[{out_bar}]"
+                )
+                cur = f"[{out_bar}]"
+                out_bar_active = f"v_lane_{row_index}_{k}_bar_active"
+                filters.append(
+                    f"{cur}drawbox=x=24:y={y_dot}:w={target_width - 84}:h=8:"
+                    f"color=yellow@0.55:t=fill:"
+                    f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                    f"[{out_bar_active}]"
+                )
+                cur = f"[{out_bar_active}]"
                 filters.append(
                     f"{cur}drawbox=x={target_width - 60}:y={y_dot}:w=18:h=18:"
                     f"color=red@1.0:t=fill:"
