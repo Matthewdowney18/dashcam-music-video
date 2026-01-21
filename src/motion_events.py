@@ -184,7 +184,7 @@ def detect_motion_events(
     return events_sorted
 
 
-def detect_smooth_segments(
+def detect_optical_flow(
     video_path: Path,
     downscale_width: int = 320,
     frame_step: int = 2,
@@ -396,7 +396,7 @@ def demo_smooth_on_pair(
     for cam in cameras_to_run:
         video_path = _select_video_from_pair(pair, cam)
         print(f"\n[smooth] Running on {cam.upper()} camera ({video_path.name})")
-        segments = detect_smooth_segments(video_path)
+        segments = detect_optical_flow(video_path)
         if not segments:
             print("  No smooth segments detected.")
             continue

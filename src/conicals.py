@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .audio_events import detect_audio_events_for_clip
-from .motion_events import detect_motion_events
+from .motion_events import detect_motion_events, detect_optical_flow
 
 try:
     import tomllib
@@ -87,6 +87,32 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
             "post_event_sec": 2.5,
             "min_event_gap_sec": 1.0,
             "max_events": 10,
+        },
+    },
+    {
+        "key": "flow_road",
+        "title": "FLOW ROAD",
+        "enabled": True,
+        "detector": "optical_flow",
+        "camera": "road",
+        "params": {
+            "downscale_width": 320,
+            "frame_step": 2,
+            "min_duration_sec": 2.0,
+            "flow_percentile": 60.0,
+        },
+    },
+    {
+        "key": "flow_cabin",
+        "title": "FLOW CABIN",
+        "enabled": True,
+        "detector": "optical_flow",
+        "camera": "cabin",
+        "params": {
+            "downscale_width": 320,
+            "frame_step": 2,
+            "min_duration_sec": 2.0,
+            "flow_percentile": 60.0,
         },
     },
     {
@@ -389,6 +415,37 @@ def _build_score_lane(spec: LaneSpec, sources: Dict[str, List[OverlayEvent]]) ->
     return _merge_overlapping(score_events)
 
 
+def _build_optical_flow_lane(spec: LaneSpec, road: Path, cabin: Path, detect_camera: str) -> List[OverlayEvent]:
+    if not _camera_allowed(spec.camera, detect_camera):
+        return []
+    params = spec.params
+    if spec.camera == "cabin":
+        path = cabin
+    elif spec.camera == "road":
+        path = road
+    else:
+        path = road
+    segments = detect_optical_flow(
+        video_path=path,
+        downscale_width=int(params.get("downscale_width", 320)),
+        frame_step=int(params.get("frame_step", 2)),
+        min_duration_sec=float(params.get("min_duration_sec", 2.0)),
+        flow_percentile=float(params.get("flow_percentile", 60.0)),
+    )
+    strengths = _normalize_strength([float(s.mean_flow) for s in segments])
+    lane_events = [
+        OverlayEvent(
+            float(s.start_time),
+            float(s.end_time),
+            float((s.start_time + s.end_time) / 2.0),
+            spec.title,
+            strengths[i],
+        )
+        for i, s in enumerate(segments)
+    ]
+    return _merge_overlapping(lane_events)
+
+
 def build_conical_lanes(
     road: Path,
     cabin: Path,
@@ -400,6 +457,7 @@ def build_conical_lanes(
     registry: Dict[str, Callable[[LaneSpec], List[OverlayEvent]]] = {
         "motion": lambda spec: _build_motion_lane(spec, road, cabin, detect_camera),
         "audio": lambda spec: _build_audio_lane(spec, road, cabin, detect_camera),
+        "optical_flow": lambda spec: _build_optical_flow_lane(spec, road, cabin, detect_camera),
     }
 
     built: Dict[str, List[OverlayEvent]] = {}

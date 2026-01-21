@@ -23,6 +23,22 @@ camera = "road"
 params = { sample_rate = 16000, k = 1.8, pre_event_sec = 1.5, post_event_sec = 2.5, min_event_gap_sec = 1.0, max_events = 10 }
 
 [[lane]]
+key = "flow_road"
+title = "FLOW ROAD"
+enabled = true
+detector = "optical_flow"
+camera = "road"
+params = { downscale_width = 320, frame_step = 2, min_duration_sec = 2.0, flow_percentile = 60.0 }
+
+[[lane]]
+key = "flow_cabin"
+title = "FLOW CABIN"
+enabled = true
+detector = "optical_flow"
+camera = "cabin"
+params = { downscale_width = 320, frame_step = 2, min_duration_sec = 2.0, flow_percentile = 60.0 }
+
+[[lane]]
 key = "score"
 title = "SCORE"
 enabled = true

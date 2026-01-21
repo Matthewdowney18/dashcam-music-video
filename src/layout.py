@@ -546,7 +546,8 @@ def _make_captioned_output_preset(
         filters.append(f"{v_main}pad={target_width}:{target_height}:0:0:black[vbase]")
 
         band_y = target_height - caption_height
-        row_h = max(1, caption_height // 4)  # 4 rows now
+        n_rows = max(1, len(lanes))
+        row_h = max(1, caption_height // n_rows)
 
         def add_lane(lane: List[OverlayEvent], row_index: int, tag_in: str) -> str:
             y_text = band_y + row_index * row_h + int(row_h * 0.18)
