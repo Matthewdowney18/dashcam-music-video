@@ -422,15 +422,68 @@ def _compute_score_events(
     return _merge_overlapping(score_events)
 
 
-def make_vertical_captioned_output_preset(
+def _ffprobe_video_width(path: Path) -> Optional[int]:
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return int(out) if out.isdigit() else None
+
+
+def _ffprobe_video_height(path: Path) -> Optional[int]:
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=height",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return int(out) if out.isdigit() else None
+
+
+def _make_captioned_output_preset(
     base_dir: Path,
     out_path: Path,
     pair_index: int = 0,
     preset: str = "debug720",
     max_duration: Optional[float] = 60.0,
+    panel_width: int = 0,
+    stack_width: Optional[int] = None,
+    detect_camera: str = "both",
+    quality: str = "final",
 ):
     if preset not in PRESETS:
         raise ValueError(f"Unknown preset {preset!r}. Choose from: {', '.join(PRESETS)}")
+    if detect_camera not in {"road", "cabin", "both"}:
+        raise ValueError("detect_camera must be one of: road, cabin, both")
+    if panel_width < 0:
+        raise ValueError("panel_width must be >= 0")
+
     p = PRESETS[preset]
     if p.caption_height <= 0:
         raise ValueError("Preset must include a caption band (caption_height > 0).")
@@ -447,12 +500,30 @@ def make_vertical_captioned_output_preset(
     cabin = pair.cabin
 
     # --- detect events ---
-    road_motion = detect_motion_events(video_path=road, downscale_width=320, frame_step=2,
-                                      pre_event_sec=3.0, post_event_sec=5.0, min_event_gap_sec=5.0,
-                                      threshold_std=2.0, max_events=20)
-    cabin_motion = detect_motion_events(video_path=cabin, downscale_width=320, frame_step=2,
-                                       pre_event_sec=3.0, post_event_sec=5.0, min_event_gap_sec=5.0,
-                                       threshold_std=2.0, max_events=20)
+    road_motion = []
+    cabin_motion = []
+    if detect_camera in {"road", "both"}:
+        road_motion = detect_motion_events(
+            video_path=road,
+            downscale_width=320,
+            frame_step=2,
+            pre_event_sec=3.0,
+            post_event_sec=5.0,
+            min_event_gap_sec=5.0,
+            threshold_std=2.0,
+            max_events=20,
+        )
+    if detect_camera in {"cabin", "both"}:
+        cabin_motion = detect_motion_events(
+            video_path=cabin,
+            downscale_width=320,
+            frame_step=2,
+            pre_event_sec=3.0,
+            post_event_sec=5.0,
+            min_event_gap_sec=5.0,
+            threshold_std=2.0,
+            max_events=20,
+        )
 
     audio_events, _features = detect_audio_events_for_clip(
         video_path=road,  # audio is same for both in your setup; choose road
@@ -512,64 +583,158 @@ def make_vertical_captioned_output_preset(
     caption_height = p.caption_height
     fps = p.fps
 
-    video_height = target_height - caption_height
-    half_h = video_height // 2
-    video_height_exact = half_h * 2
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     filters: List[str] = []
-    filters.append(f"[0:v]scale={target_width}:{half_h}:flags=lanczos,setsar=1[v0]")
-    filters.append(f"[1:v]scale={target_width}:{half_h}:flags=lanczos,setsar=1[v1]")
-    filters.append("[v0][v1]vstack=inputs=2[vstack]")
-
-    if video_height_exact != video_height:
-        filters.append(f"[vstack]pad={target_width}:{video_height}:0:0:black[vpad]")
-        v_main = "[vpad]"
-    else:
-        v_main = "[vstack]"
-
-    filters.append(f"{v_main}pad={target_width}:{target_height}:0:0:black[vbase]")
-
-    band_y = target_height - caption_height
-    row_h = max(1, caption_height // 4)  # 4 rows now
     fontfile = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-    def add_lane(lane: List[OverlayEvent], row_index: int, tag_in: str) -> str:
-        y_text = band_y + row_index * row_h + int(row_h * 0.18)
-        y_dot = band_y + row_index * row_h + int(row_h * 0.62)
-        cur = tag_in
-        for k, e in enumerate(lane):
-            out_tag = f"v_lane_{row_index}_{k}"
-            safe_label = e.label.replace(":", "\\:")
-            filters.append(
-                f"{cur}drawtext=fontfile={fontfile}:"
-                f"text='{safe_label}':x=24:y={y_text}:"
-                f"fontsize={int(row_h*0.55)}:fontcolor=white:"
-                f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
-                f"[{out_tag}]"
-            )
-            cur = f"[{out_tag}]"
+    if quality not in {"debug", "final"}:
+        raise ValueError("quality must be one of: debug, final")
 
-            out_tag2 = f"v_lane_{row_index}_{k}_dot"
-            dot_start = max(0.0, e.peak - 0.15)
-            dot_end = e.peak + 0.15
-            filters.append(
-                f"{cur}drawbox=x={target_width - 60}:y={y_dot}:w=18:h=18:"
-                f"color=red@1.0:t=fill:"
-                f"enable='between(t,{dot_start:.3f},{dot_end:.3f})'"
-                f"[{out_tag2}]"
-            )
-            cur = f"[{out_tag2}]"
-        return cur
+    if panel_width > 0:
+        road_w = _ffprobe_video_width(road)
+        road_h = _ffprobe_video_height(road)
+        cabin_w = _ffprobe_video_width(cabin)
+        cabin_h = _ffprobe_video_height(cabin)
+        if quality == "debug":
+            panel_width = 420 if panel_width == 0 else panel_width
+            stack_w = stack_width or 960
+        else:
+            stack_w = stack_width or road_w or target_width
+        stack_h = None
+        if road_w and road_h and cabin_w and cabin_h:
+            road_scaled_h = int(round(road_h * (stack_w / road_w)))
+            cabin_scaled_h = int(round(cabin_h * (stack_w / cabin_w)))
+            stack_h = max(2, road_scaled_h) + max(2, cabin_scaled_h)
 
-    vtag = "[vbase]"
-    vtag = add_lane(road_lane, 0, vtag)
-    vtag = add_lane(cabin_lane, 1, vtag)
-    vtag = add_lane(audio_lane, 2, vtag)
-    vtag = add_lane(score_lane, 3, vtag)
+        filters.append(
+            f"[0:v]scale={stack_w}:-2:force_original_aspect_ratio=decrease,setsar=1"
+            f",pad={stack_w}:ih:(ow-iw)/2:(oh-ih)/2:black[v0]"
+        )
+        filters.append(
+            f"[1:v]scale={stack_w}:-2:force_original_aspect_ratio=decrease,setsar=1"
+            f",pad={stack_w}:ih:(ow-iw)/2:(oh-ih)/2:black[v1]"
+        )
+        filters.append("[v0][v1]vstack=inputs=2[vstack]")
+        filters.append(f"[vstack]pad={stack_w + panel_width}:ih:0:0:black[vpad]")
+        panel_alpha = 1.0 if quality == "debug" else 0.35
+        filters.append(
+            f"[vpad]drawbox=x={stack_w}:y=0:w={panel_width}:h=ih:color=black@{panel_alpha}:t=fill[vbase]"
+        )
 
-    filters.append(f"{vtag}fps={fps}[vfinal]")
+        panel_x0 = stack_w
+        panel_y0 = 0
+        panel_h = stack_h
+        panel_w = panel_width
+        panel_font_scale = 1.5
+        panel_font_size_base = 20
+        panel_font_size = int(panel_font_size_base * panel_font_scale)
+        row_h = max(1, int(panel_font_size * 1.3))
+        y_pad = max(1, int(panel_font_size * 0.2))
+        margin_x = 18
+
+        def add_lane(lane: List[OverlayEvent], row_index: int, tag_in: str, header: str, text_events: bool) -> str:
+            y_text = panel_y0 + row_index * row_h + y_pad
+            y_dot = panel_y0 + row_index * row_h + y_pad + int(row_h * 0.6)
+            cur = tag_in
+            if header:
+                out_header = f"v_lane_{row_index}_hdr"
+                safe_header = header.replace(":", "\\:")
+                filters.append(
+                    f"{cur}drawtext=fontfile={fontfile}:"
+                    f"text='{safe_header}':x={panel_x0 + margin_x}:y={y_text}:"
+                    f"fontsize={panel_font_size}:fontcolor=white:"
+                    f"enable='1'"
+                    f"[{out_header}]"
+                )
+                cur = f"[{out_header}]"
+            for k, e in enumerate(lane):
+                if text_events:
+                    out_tag = f"v_lane_{row_index}_{k}"
+                    safe_label = e.label.replace(":", "\\:")
+                    filters.append(
+                        f"{cur}drawtext=fontfile={fontfile}:"
+                        f"text='{safe_label}':x={panel_x0 + margin_x}:y={y_text}:"
+                        f"fontsize={int(row_h*0.55)}:fontcolor=white:"
+                        f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                        f"[{out_tag}]"
+                    )
+                    cur = f"[{out_tag}]"
+
+                out_tag2 = f"v_lane_{row_index}_{k}_dot"
+                dot_start = max(0.0, e.peak - 0.15)
+                dot_end = e.peak + 0.15
+                filters.append(
+                    f"{cur}drawbox=x={panel_x0 + panel_w - (margin_x + 18)}:y={y_dot}:w=18:h=18:"
+                    f"color=red@1.0:t=fill:"
+                    f"enable='between(t,{dot_start:.3f},{dot_end:.3f})'"
+                    f"[{out_tag2}]"
+                )
+                cur = f"[{out_tag2}]"
+            return cur
+
+        vtag = "[vbase]"
+        debug_text_events = (quality == "final")
+        vtag = add_lane(road_lane, 0, vtag, "MOTION ROAD", debug_text_events)
+        vtag = add_lane(cabin_lane, 1, vtag, "MOTION CABIN", debug_text_events)
+        vtag = add_lane(audio_lane, 2, vtag, "AUDIO", debug_text_events)
+        vtag = add_lane(score_lane, 3, vtag, "SCORE", True)
+        filters.append(f"{vtag}fps={fps}[vfinal]")
+    else:
+        video_height = target_height - caption_height
+        half_h = video_height // 2
+        video_height_exact = half_h * 2
+
+        filters.append(f"[0:v]scale={target_width}:{half_h}:flags=lanczos,setsar=1[v0]")
+        filters.append(f"[1:v]scale={target_width}:{half_h}:flags=lanczos,setsar=1[v1]")
+        filters.append("[v0][v1]vstack=inputs=2[vstack]")
+
+        if video_height_exact != video_height:
+            filters.append(f"[vstack]pad={target_width}:{video_height}:0:0:black[vpad]")
+            v_main = "[vpad]"
+        else:
+            v_main = "[vstack]"
+
+        filters.append(f"{v_main}pad={target_width}:{target_height}:0:0:black[vbase]")
+
+        band_y = target_height - caption_height
+        row_h = max(1, caption_height // 4)  # 4 rows now
+
+        def add_lane(lane: List[OverlayEvent], row_index: int, tag_in: str) -> str:
+            y_text = band_y + row_index * row_h + int(row_h * 0.18)
+            y_dot = band_y + row_index * row_h + int(row_h * 0.62)
+            cur = tag_in
+            for k, e in enumerate(lane):
+                out_tag = f"v_lane_{row_index}_{k}"
+                safe_label = e.label.replace(":", "\\:")
+                filters.append(
+                    f"{cur}drawtext=fontfile={fontfile}:"
+                    f"text='{safe_label}':x=24:y={y_text}:"
+                    f"fontsize={int(row_h*0.55)}:fontcolor=white:"
+                    f"enable='between(t,{e.start:.3f},{e.end:.3f})'"
+                    f"[{out_tag}]"
+                )
+                cur = f"[{out_tag}]"
+
+                out_tag2 = f"v_lane_{row_index}_{k}_dot"
+                dot_start = max(0.0, e.peak - 0.15)
+                dot_end = e.peak + 0.15
+                filters.append(
+                    f"{cur}drawbox=x={target_width - 60}:y={y_dot}:w=18:h=18:"
+                    f"color=red@1.0:t=fill:"
+                    f"enable='between(t,{dot_start:.3f},{dot_end:.3f})'"
+                    f"[{out_tag2}]"
+                )
+                cur = f"[{out_tag2}]"
+            return cur
+
+        vtag = "[vbase]"
+        vtag = add_lane(road_lane, 0, vtag)
+        vtag = add_lane(cabin_lane, 1, vtag)
+        vtag = add_lane(audio_lane, 2, vtag)
+        vtag = add_lane(score_lane, 3, vtag)
+        filters.append(f"{vtag}fps={fps}[vfinal]")
+
     filter_complex = ";".join(filters)
 
     cmd = [
@@ -582,8 +747,8 @@ def make_vertical_captioned_output_preset(
         "-map", "[vfinal]",
         "-map", "0:a?",
         "-c:v", "libx264",
-        "-preset", p.x264_preset,
-        "-crf", str(p.crf),
+        "-preset", ("ultrafast" if quality == "debug" else p.x264_preset),
+        "-crf", str(23 if quality == "debug" else p.crf),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "128k",
@@ -601,3 +766,48 @@ def make_vertical_captioned_output_preset(
         expected_duration_s = min(d0, d1) if (d0 and d1) else (d0 or d1)
 
     _run_ffmpeg_with_progress(cmd, expected_duration_s)
+
+
+def make_vertical_captioned_output_preset(
+    base_dir: Path,
+    out_path: Path,
+    pair_index: int = 0,
+    preset: str = "debug720",
+    max_duration: Optional[float] = 60.0,
+    detect_camera: str = "both",
+):
+    return _make_captioned_output_preset(
+        base_dir=base_dir,
+        out_path=out_path,
+        pair_index=pair_index,
+        preset=preset,
+        max_duration=max_duration,
+        panel_width=0,
+        detect_camera=detect_camera,
+    )
+
+
+def make_captioned_output_preset(
+    base_dir: Path,
+    out_path: Path,
+    pair_index: int = 0,
+    preset: str = "debug720",
+    max_duration: Optional[float] = 60.0,
+    panel_width: Optional[int] = None,
+    detect_camera: str = "both",
+    stack_width: Optional[int] = None,
+    quality: str = "debug",
+):
+    if panel_width is None:
+        panel_width = 420 if quality == "debug" else 480
+    return _make_captioned_output_preset(
+        base_dir=base_dir,
+        out_path=out_path,
+        pair_index=pair_index,
+        preset=preset,
+        max_duration=max_duration,
+        panel_width=panel_width,
+        detect_camera=detect_camera,
+        stack_width=stack_width,
+        quality=quality,
+    )

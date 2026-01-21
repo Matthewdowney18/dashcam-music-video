@@ -96,19 +96,45 @@ Available presets:
 
 ---
 
-## Debug Viewer
+## Render Captioned (Vertical)
+Caption band with event overlays.
+
 ```bash
-python -m src.run --base-dir "$BASE" debug-viewer --index 7
-cd output/debug_viewer
-python3 -m http.server 8000
+python -m src.run --base-dir "$BASE" captioned \
+  --index 7 \
+  --out output/captioned_7.mp4 \
+  --seconds 10 \
+  --preset debug720 \
+  --detect-camera road
 ```
 
-Open: `http://localhost:8000/viewer.html`
+---
 
-Stop the server:
+## Render Captioned + Side Panel
+Caption band plus a right-side panel for future annotations.
+Defaults: `--quality debug` uses faster encode, smaller panel, and fewer labels.
+
 ```bash
-lsof -i :8000
-kill <PID>
+python -m src.run --base-dir "$BASE" captioned-panel \
+  --index 7 \
+  --out output/captioned_panel_7.mp4 \
+  --seconds 10 \
+  --preset debug720 \
+  --quality debug \
+  --panel-width 420 \
+  --stack-width 960 \
+  --detect-camera road
+```
+
+Final quality (slower, full labels):
+```bash
+python -m src.run --base-dir "$BASE" captioned-panel \
+  --index 7 \
+  --out output/captioned_panel_7_final.mp4 \
+  --seconds 10 \
+  --preset debug720 \
+  --quality final \
+  --detect-camera road
 ```
 
 ---

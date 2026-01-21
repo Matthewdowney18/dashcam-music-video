@@ -31,7 +31,7 @@ from .ingest import DashcamConfig, discover_pairs, print_ingest_summary
 from .motion_events import detect_motion_events, MotionEvent
 from .audio_events import detect_audio_events_for_clip
 from .layout import make_vertical_test_output_preset
-from .layout import make_vertical_captioned_output_preset
+from .layout import make_vertical_captioned_output_preset, make_captioned_output_preset
 
 from .types.events import EventSet, Event
 from .types.adapters import motion_events_to_canonical, audio_events_to_canonical
@@ -112,6 +112,19 @@ def cmd_captioned(args):
         preset=args.preset,
         max_duration=args.seconds,
         detect_camera=args.detect_camera,
+    )
+
+def cmd_captioned_panel(args):
+    make_captioned_output_preset(
+        base_dir=Path(args.base_dir),
+        out_path=Path(args.out),
+        pair_index=args.index,
+        preset=args.preset,
+        max_duration=args.seconds,
+        panel_width=args.panel_width,
+        stack_width=args.stack_width,
+        detect_camera=args.detect_camera,
+        quality=args.quality,
     )
 
 def cmd_ingest(args):
@@ -255,6 +268,17 @@ def build_parser():
     s.add_argument("--preset", default="debug720")  # uses caption band
     s.add_argument("--detect-camera", choices=["road", "cabin"], default="road")
     s.set_defaults(func=cmd_captioned)
+
+    s = sub.add_parser("captioned-panel")
+    s.add_argument("--index", type=int, default=0)
+    s.add_argument("--out", default="output/captioned_panel.mp4")
+    s.add_argument("--seconds", type=float, default=60.0)
+    s.add_argument("--preset", default="debug720")  # uses caption band
+    s.add_argument("--panel-width", type=int, default=None)
+    s.add_argument("--stack-width", type=int, default=None)
+    s.add_argument("--quality", choices=["debug", "final"], default="debug")
+    s.add_argument("--detect-camera", choices=["road", "cabin"], default="road")
+    s.set_defaults(func=cmd_captioned_panel)
 
     s = sub.add_parser("captioned-last")
     s.add_argument("--last", type=int, default=10)

@@ -33,6 +33,7 @@ and clip-selection logic to remain simple and testable.
 import re
 import sys
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -68,11 +69,26 @@ def _run_ffmpeg_with_progress(cmd: list[str], expected_duration_s: Optional[floa
     except Exception:
         tqdm = None  # type: ignore
 
+    # Ensure ffmpeg progress flags are present
+    if cmd and cmd[0] == "ffmpeg":
+        def _has(flag: str) -> bool:
+            return flag in cmd
+        if not _has("-hide_banner"):
+            cmd.insert(1, "-hide_banner")
+        if not _has("-nostats"):
+            cmd.insert(1, "-nostats")
+        if not _has("-loglevel"):
+            cmd.insert(1, "error")
+            cmd.insert(1, "-loglevel")
+        if not _has("-progress"):
+            cmd.insert(1, "pipe:1")
+            cmd.insert(1, "-progress")
+
     # ffmpeg progress comes on stdout in key=value lines
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,  # keep errors for debugging
+        stderr=subprocess.DEVNULL,
         text=True,
         bufsize=1,
         universal_newlines=True,
@@ -80,48 +96,72 @@ def _run_ffmpeg_with_progress(cmd: list[str], expected_duration_s: Optional[floa
 
     if proc.stdout is None:
         raise RuntimeError("Failed to capture ffmpeg stdout for progress.")
-    if proc.stderr is None:
-        raise RuntimeError("Failed to capture ffmpeg stderr.")
-
     bar = None
     if tqdm is not None and expected_duration_s and expected_duration_s > 0:
         bar = tqdm(total=expected_duration_s, unit="s", dynamic_ncols=True)
 
     last_t = 0.0
+    last_update = 0.0
     out_time_ms_re = re.compile(r"^out_time_ms=(\d+)$")
+    out_time_us_re = re.compile(r"^out_time_us=(\d+)$")
+    out_time_re = re.compile(r"^out_time=([0-9:.]+)$")
 
     try:
         for line in proc.stdout:
             line = line.strip()
 
             # Common keys: frame=, fps=, out_time_ms=, speed=, progress=
+            if line == "progress=end":
+                break
+
+            t = None
             m = out_time_ms_re.match(line)
             if m:
                 out_ms = int(m.group(1))
                 t = out_ms / 1_000_000.0  # microseconds → seconds
-                if bar is not None:
-                    delta = max(0.0, t - last_t)
-                    if delta:
-                        bar.update(delta)
+            else:
+                m = out_time_us_re.match(line)
+                if m:
+                    out_us = int(m.group(1))
+                    t = out_us / 1_000_000.0
                 else:
-                    # Fallback: print percent-ish if we can
-                    if expected_duration_s and expected_duration_s > 0:
-                        pct = min(100.0, (t / expected_duration_s) * 100.0)
-                        sys.stdout.write(f"\r[ffmpeg] {pct:6.2f}%  ({t:6.1f}s / {expected_duration_s:6.1f}s)")
-                        sys.stdout.flush()
-                    else:
-                        sys.stdout.write(f"\r[ffmpeg] {t:6.1f}s")
-                        sys.stdout.flush()
-                last_t = t
+                    m = out_time_re.match(line)
+                    if m:
+                        parts = m.group(1).split(":")
+                        try:
+                            if len(parts) == 3:
+                                h, mi, s = parts
+                                t = float(h) * 3600 + float(mi) * 60 + float(s)
+                        except ValueError:
+                            t = None
 
-            if line == "progress=end":
-                break
+            if t is None:
+                continue
+
+            now = time.monotonic()
+            if now - last_update < 0.2:
+                continue
+
+            if bar is not None:
+                delta = max(0.0, t - last_t)
+                if delta:
+                    bar.update(delta)
+            else:
+                # Fallback: print percent-ish if we can
+                if expected_duration_s and expected_duration_s > 0:
+                    pct = min(100.0, (t / expected_duration_s) * 100.0)
+                    sys.stdout.write(f"\r[ffmpeg] {pct:6.2f}%  ({t:6.1f}s / {expected_duration_s:6.1f}s)")
+                    sys.stdout.flush()
+                else:
+                    sys.stdout.write(f"\r[ffmpeg] {t:6.1f}s")
+                    sys.stdout.flush()
+            last_t = t
+            last_update = now
     finally:
         if bar is not None:
             bar.close()
 
-    stdout_rest = proc.stdout.read() if proc.stdout else ""
-    stderr = proc.stderr.read() if proc.stderr else ""
+    proc.stdout.read() if proc.stdout else ""
     rc = proc.wait()
 
     if bar is None:
@@ -129,4 +169,4 @@ def _run_ffmpeg_with_progress(cmd: list[str], expected_duration_s: Optional[floa
         sys.stdout.flush()
 
     if rc != 0:
-        raise RuntimeError(f"ffmpeg failed with code {rc}\n{stderr}")
+        raise RuntimeError(f"ffmpeg failed with code {rc}")
