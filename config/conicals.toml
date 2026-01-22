@@ -39,10 +39,57 @@ camera = "cabin"
 params = { downscale_width = 320, frame_step = 2, min_duration_sec = 2.0, flow_percentile = 60.0 }
 
 [[lane]]
+key = "vehicle_moving_road"
+title = "MOVING"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+params = { kind = "moving" }
+
+[[lane]]
+key = "vehicle_stopped_road"
+title = "STOPPED"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+params = { kind = "stopped" }
+
+[[lane]]
+key = "vehicle_accel_road"
+title = "ACCEL"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+params = { kind = "accel" }
+
+[[lane]]
+key = "vehicle_decel_road"
+title = "DECEL"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+params = { kind = "decel" }
+
+[[lane]]
+key = "vehicle_turn_road"
+title = "TURN"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+params = { kind = "turn" }
+
+[[lane]]
 key = "score"
 title = "SCORE"
 enabled = true
 detector = "score"
 camera = "both"
-params.sources = ["motion_road", "motion_cabin", "audio"]
-params.weights = { motion_road = 0.4, motion_cabin = 0.3, audio = 0.3 }
+params.sources = [
+  "motion_road",
+  "motion_cabin",
+  "audio",
+  "vehicle_accel_road",
+  "vehicle_decel_road",
+  "vehicle_turn_road"
+]
+params.weights = { motion_road = 0.35, motion_cabin = 0.25, audio = 0.25, vehicle_accel_road = 0.05, vehicle_decel_road = 0.05, vehicle_turn_road = 0.05 }

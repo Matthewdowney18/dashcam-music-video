@@ -1,6 +1,13 @@
 [model.weighted_union]
-sources = ["motion_road", "motion_cabin", "audio"]
-weights = { motion_road = 0.4, motion_cabin = 0.3, audio = 0.3 }
+sources = [
+  "motion_road",
+  "motion_cabin",
+  "audio",
+  "vehicle_accel_road",
+  "vehicle_decel_road",
+  "vehicle_turn_road"
+]
+weights = { motion_road = 0.35, motion_cabin = 0.25, audio = 0.25, vehicle_accel_road = 0.05, vehicle_decel_road = 0.05, vehicle_turn_road = 0.05 }
 normalize = "sum"
 peak_strategy = "best_weighted"
 merge_overlaps = true

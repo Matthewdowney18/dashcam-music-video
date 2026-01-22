@@ -27,12 +27,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from .detection_profiles import MotionEventDetectConfig, OpticalFlowDetectConfig
+from .detection_profiles import (
+    MotionEventDetectConfig,
+    OpticalFlowDetectConfig,
+    VehicleDynamicsDetectConfig,
+)
 
 from .ingest import DashcamConfig, discover_pairs
 
@@ -68,6 +72,15 @@ class SmoothSegment:
         )
 
 
+@dataclass
+class VehicleEvent:
+    start: float
+    end: float
+    kind: str
+    score: float
+    meta: Dict[str, object]
+
+
 def _ensure_odd(n: int) -> int:
     return n if n % 2 == 1 else n + 1
 
@@ -91,6 +104,14 @@ def _smooth_signal(signal: np.ndarray, mode: str, kernel: int, ema_alpha: float)
             out[i] = float(np.median(padded[i:i + k]))
         return out
     return signal
+
+
+def _stat_value(arr: np.ndarray, mode: str) -> float:
+    if arr.size == 0:
+        return 0.0
+    if mode == "mean":
+        return float(np.mean(arr))
+    return float(np.median(arr))
 
 
 def _mad(arr: np.ndarray) -> float:
@@ -154,6 +175,80 @@ def _find_runs(mask: np.ndarray) -> List[tuple[int, int]]:
     if start is not None:
         runs.append((start, len(mask) - 1))
     return runs
+
+
+def _remove_short_runs(mask: np.ndarray, min_samples: int) -> np.ndarray:
+    if min_samples <= 1:
+        return mask
+    out = mask.copy()
+    for (s_idx, e_idx) in _find_runs(mask):
+        if (e_idx - s_idx + 1) < min_samples:
+            out[s_idx:e_idx + 1] = False
+    return out
+
+
+def _compute_optical_flow_stats(
+    video_path: Path,
+    downscale_width: int,
+    frame_step: int,
+    stat_fn: Callable[[np.ndarray], Dict[str, float]],
+) -> Tuple[np.ndarray, Dict[str, np.ndarray], float, float]:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+
+    prev_gray = None
+    times: List[float] = []
+    stats: Dict[str, List[float]] = {}
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % frame_step != 0:
+            frame_idx += 1
+            continue
+
+        h, w = frame.shape[:2]
+        scale = downscale_width / float(w)
+        new_size = (downscale_width, int(h * scale))
+        frame_small = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
+
+        gray = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
+
+        if prev_gray is None:
+            prev_gray = gray
+            frame_idx += 1
+            continue
+
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_gray, gray, None,
+            0.5, 3, 15, 3, 5, 1.2, 0
+        )
+        stat_values = stat_fn(flow)
+
+        t = frame_idx / fps
+        times.append(t)
+        for k, v in stat_values.items():
+            stats.setdefault(k, []).append(float(v))
+
+        prev_gray = gray
+        frame_idx += 1
+
+    cap.release()
+
+    if not times:
+        return np.array([]), {}, float(fps), float(total_frames)
+
+    times_arr = np.array(times)
+    stats_arr = {k: np.array(v) for k, v in stats.items()}
+    duration_s = (float(total_frames) / fps) if total_frames > 0 else float(times_arr[-1])
+    return times_arr, stats_arr, float(fps), float(duration_s)
 
 
 def detect_motion_events(
@@ -379,63 +474,22 @@ def detect_optical_flow(
     else:
         cfg = OpticalFlowDetectConfig.from_dict(config, base=base_cfg)
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video: {video_path}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
-
-    prev_gray = None
-    times: List[float] = []
-    mag_means: List[float] = []
-
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % cfg.frame_step != 0:
-            frame_idx += 1
-            continue
-
-        h, w = frame.shape[:2]
-        scale = cfg.downscale_width / float(w)
-        new_size = (cfg.downscale_width, int(h * scale))
-        frame_small = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
-
-        gray = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
-
-        if prev_gray is None:
-            prev_gray = gray
-            frame_idx += 1
-            continue
-
-        flow = cv2.calcOpticalFlowFarneback(
-            prev_gray, gray, None,
-            0.5, 3, 15, 3, 5, 1.2, 0
-        )
+    def stat_fn(flow: np.ndarray) -> Dict[str, float]:
         fx, fy = flow[..., 0], flow[..., 1]
         mag, _ = cv2.cartToPolar(fx, fy)
-        mag_mean = float(mag.mean())
+        return {"mag_mean": float(mag.mean())}
 
-        t = frame_idx / fps
-        times.append(t)
-        mag_means.append(mag_mean)
-
-        prev_gray = gray
-        frame_idx += 1
-
-    cap.release()
-
-    if not mag_means:
+    times_arr, stats, fps, duration_s = _compute_optical_flow_stats(
+        video_path=video_path,
+        downscale_width=cfg.downscale_width,
+        frame_step=cfg.frame_step,
+        stat_fn=stat_fn,
+    )
+    if times_arr.size == 0:
         print("[smooth] No frames processed.")
         return [] if not cfg.return_debug else ([], {"reason": "no_frames"})
 
-    times_arr = np.array(times)
-    mag_arr = np.array(mag_means)
-    duration_s = (float(total_frames) / fps) if total_frames > 0 else float(times_arr[-1])
+    mag_arr = stats.get("mag_mean", np.array([]))
     dt_sec = (float(cfg.frame_step) / fps) if fps and np.isfinite(fps) else 0.0
 
     smooth = _smooth_signal(
@@ -544,6 +598,369 @@ def detect_optical_flow(
 
 
 # ---------------------------------------------------------------------------
+
+
+def _resolve_roi_bounds(
+    roi: Tuple[float, float, float, float],
+    width: int,
+    height: int,
+) -> Tuple[int, int, int, int]:
+    x0, y0, x1, y1 = roi
+    if max(x0, y0, x1, y1) <= 1.0:
+        x0 = int(round(x0 * width))
+        x1 = int(round(x1 * width))
+        y0 = int(round(y0 * height))
+        y1 = int(round(y1 * height))
+    x0 = max(0, min(width - 1, int(round(x0))))
+    x1 = max(1, min(width, int(round(x1))))
+    y0 = max(0, min(height - 1, int(round(y0))))
+    y1 = max(1, min(height, int(round(y1))))
+    if x1 <= x0 + 1 or y1 <= y0 + 1:
+        return 0, 0, width, height
+    return x0, y0, x1, y1
+
+
+def _compute_vehicle_flow_series(
+    video_path: Path,
+    cfg: VehicleDynamicsDetectConfig,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    roi_bounds = {"set": False, "roi": (0, 0, 0, 0)}
+
+    def stat_fn(flow: np.ndarray) -> Dict[str, float]:
+        fx, fy = flow[..., 0], flow[..., 1]
+        mag, _ = cv2.cartToPolar(fx, fy)
+        h, w = mag.shape[:2]
+        if not roi_bounds["set"]:
+            roi_bounds["roi"] = _resolve_roi_bounds(cfg.road_roi, w, h)
+            roi_bounds["set"] = True
+        x0, y0, x1, y1 = roi_bounds["roi"]
+        mag_roi = mag[y0:y1, x0:x1]
+        fx_roi = fx[y0:y1, x0:x1]
+        if mag_roi.size == 0 or fx_roi.size == 0:
+            speed_proxy = _stat_value(mag, cfg.flow_stat)
+            yaw_proxy = 0.0
+        else:
+            speed_proxy = _stat_value(mag_roi, cfg.flow_stat)
+            mid = x0 + (x1 - x0) // 2
+            fx_left = fx[y0:y1, x0:mid]
+            fx_right = fx[y0:y1, mid:x1]
+            if fx_left.size == 0 or fx_right.size == 0:
+                yaw_proxy = 0.0
+            else:
+                yaw_proxy = _stat_value(fx_right, cfg.flow_stat) - _stat_value(
+                    fx_left, cfg.flow_stat
+                )
+        return {"speed": speed_proxy, "yaw": yaw_proxy}
+
+    times_arr, stats, fps, duration_s = _compute_optical_flow_stats(
+        video_path=video_path,
+        downscale_width=cfg.downscale_width,
+        frame_step=cfg.frame_step,
+        stat_fn=stat_fn,
+    )
+    if times_arr.size == 0:
+        return np.array([]), np.array([]), np.array([]), 0.0
+    speed = stats.get("speed", np.array([]))
+    yaw = stats.get("yaw", np.array([]))
+    dt_sec = (float(cfg.frame_step) / fps) if fps and np.isfinite(fps) else 0.0
+    return times_arr, speed, yaw, dt_sec
+
+
+def _smooth_seconds(signal: np.ndarray, seconds: float, dt_sec: float) -> np.ndarray:
+    if signal.size == 0:
+        return signal
+    if seconds <= 0 or dt_sec <= 0:
+        return signal
+    kernel = max(1, int(round(seconds / dt_sec)))
+    kernel = _ensure_odd(kernel)
+    return _smooth_signal(signal, mode="median", kernel=kernel, ema_alpha=0.0)
+
+
+def detect_vehicle_state_segments(
+    times: np.ndarray,
+    speed_proxy: np.ndarray,
+    cfg: VehicleDynamicsDetectConfig,
+    duration_s: Optional[float] = None,
+) -> Tuple[List[VehicleEvent], List[VehicleEvent]]:
+    if times.size == 0 or speed_proxy.size == 0:
+        return [], []
+    dt_sec = float(times[1] - times[0]) if times.size > 1 else 0.0
+    smooth = _smooth_seconds(speed_proxy, cfg.speed_smooth_seconds, dt_sec)
+    high_thr = float(cfg.moving_threshold)
+    if cfg.stopped_threshold is not None and high_thr > 0:
+        low_ratio = float(cfg.stopped_threshold) / high_thr
+    else:
+        low_ratio = 0.8
+    moving_mask = _apply_hysteresis(smooth, high_thr, low_ratio)
+    min_samples = max(1, int(round(cfg.state_hysteresis_seconds / dt_sec))) if dt_sec > 0 else 1
+    moving_mask = _remove_short_runs(moving_mask, min_samples)
+    stopped_mask = _remove_short_runs(~moving_mask, min_samples)
+
+    duration = float(duration_s) if duration_s is not None else float(times[-1])
+    moving_events: List[VehicleEvent] = []
+    for (s_idx, e_idx) in _find_runs(moving_mask):
+        start_t = float(times[s_idx])
+        end_t = float(times[e_idx] + dt_sec)
+        mean_speed = float(np.mean(smooth[s_idx:e_idx + 1]))
+        moving_events.append(
+            VehicleEvent(
+                start=start_t,
+                end=min(duration, end_t),
+                kind="vehicle_moving",
+                score=mean_speed,
+                meta={"peak_s": (start_t + end_t) / 2.0},
+            )
+        )
+
+    stopped_events: List[VehicleEvent] = []
+    for (s_idx, e_idx) in _find_runs(stopped_mask):
+        start_t = float(times[s_idx])
+        end_t = float(times[e_idx] + dt_sec)
+        mean_speed = float(np.mean(smooth[s_idx:e_idx + 1]))
+        score = max(0.0, high_thr - mean_speed)
+        stopped_events.append(
+            VehicleEvent(
+                start=start_t,
+                end=min(duration, end_t),
+                kind="vehicle_stopped",
+                score=score,
+                meta={"peak_s": (start_t + end_t) / 2.0},
+            )
+        )
+    return moving_events, stopped_events
+
+
+def _find_peak_indices(
+    signal: np.ndarray,
+    mask: np.ndarray,
+    min_separation_samples: int,
+    peak_mode: str,
+) -> List[int]:
+    runs = _find_runs(mask)
+    peaks: List[int] = []
+    for (s_idx, e_idx) in runs:
+        window = signal[s_idx:e_idx + 1]
+        if window.size == 0:
+            continue
+        if peak_mode == "max":
+            peak_rel = int(np.argmax(window))
+        else:
+            peak_rel = int(np.argmin(window))
+        peaks.append(s_idx + peak_rel)
+
+    if not peaks:
+        return []
+
+    peaks = sorted(peaks)
+    filtered: List[int] = []
+    for idx in peaks:
+        if not filtered:
+            filtered.append(idx)
+            continue
+        last = filtered[-1]
+        if abs(idx - last) < min_separation_samples:
+            choose_idx = idx if abs(signal[idx]) > abs(signal[last]) else last
+            filtered[-1] = choose_idx
+        else:
+            filtered.append(idx)
+    return filtered
+
+
+def _detect_spikes(
+    times: np.ndarray,
+    series: np.ndarray,
+    threshold: Optional[float],
+    zscore_threshold: Optional[float],
+    min_separation_sec: float,
+    pad_sec: float,
+    kind: str,
+    duration_s: Optional[float],
+    peak_mode: str,
+) -> List[VehicleEvent]:
+    if times.size == 0 or series.size == 0:
+        return []
+    dt_sec = float(times[1] - times[0]) if times.size > 1 else 0.0
+    if threshold is None and zscore_threshold is not None:
+        med = float(np.median(series))
+        mad = _mad(series) * 1.4826
+        if mad <= 1e-9:
+            threshold = med + (zscore_threshold * (1.0 if peak_mode == "max" else -1.0))
+        else:
+            threshold = med + (zscore_threshold * mad * (1.0 if peak_mode == "max" else -1.0))
+
+    if threshold is None:
+        return []
+
+    if peak_mode == "max":
+        mask = series >= float(threshold)
+    else:
+        mask = series <= float(threshold)
+
+    min_sep_samples = max(1, int(round(min_separation_sec / dt_sec))) if dt_sec > 0 else 1
+    peak_indices = _find_peak_indices(series, mask, min_sep_samples, peak_mode=peak_mode)
+    duration = float(duration_s) if duration_s is not None else float(times[-1])
+    events: List[VehicleEvent] = []
+    for idx in peak_indices:
+        peak_t = float(times[idx])
+        start_t = max(0.0, peak_t - pad_sec)
+        end_t = min(duration, peak_t + pad_sec)
+        score = float(abs(series[idx]))
+        events.append(
+            VehicleEvent(
+                start=start_t,
+                end=end_t,
+                kind=kind,
+                score=score,
+                meta={"peak_s": peak_t, "value": float(series[idx])},
+            )
+        )
+    return events
+
+
+def detect_accel_spikes(
+    times: np.ndarray,
+    speed_proxy: np.ndarray,
+    cfg: VehicleDynamicsDetectConfig,
+    duration_s: Optional[float] = None,
+) -> List[VehicleEvent]:
+    if times.size < 2:
+        return []
+    dt_sec = float(times[1] - times[0]) if times.size > 1 else 0.0
+    smooth_speed = _smooth_seconds(speed_proxy, cfg.speed_smooth_seconds, dt_sec)
+    accel = np.gradient(smooth_speed, times)
+    accel = _smooth_seconds(accel, cfg.accel_smooth_seconds, dt_sec)
+    return _detect_spikes(
+        times=times,
+        series=accel,
+        threshold=cfg.accel_threshold,
+        zscore_threshold=cfg.accel_zscore_threshold,
+        min_separation_sec=cfg.spike_min_separation_seconds,
+        pad_sec=cfg.spike_event_padding_seconds,
+        kind="vehicle_accel",
+        duration_s=duration_s,
+        peak_mode="max",
+    )
+
+
+def detect_decel_spikes(
+    times: np.ndarray,
+    speed_proxy: np.ndarray,
+    cfg: VehicleDynamicsDetectConfig,
+    duration_s: Optional[float] = None,
+) -> List[VehicleEvent]:
+    if times.size < 2:
+        return []
+    dt_sec = float(times[1] - times[0]) if times.size > 1 else 0.0
+    smooth_speed = _smooth_seconds(speed_proxy, cfg.speed_smooth_seconds, dt_sec)
+    accel = np.gradient(smooth_speed, times)
+    accel = _smooth_seconds(accel, cfg.accel_smooth_seconds, dt_sec)
+    return _detect_spikes(
+        times=times,
+        series=accel,
+        threshold=cfg.decel_threshold,
+        zscore_threshold=cfg.decel_zscore_threshold,
+        min_separation_sec=cfg.spike_min_separation_seconds,
+        pad_sec=cfg.spike_event_padding_seconds,
+        kind="vehicle_decel",
+        duration_s=duration_s,
+        peak_mode="min",
+    )
+
+
+def detect_turn_segments(
+    times: np.ndarray,
+    yaw_proxy: np.ndarray,
+    cfg: VehicleDynamicsDetectConfig,
+    duration_s: Optional[float] = None,
+) -> List[VehicleEvent]:
+    if times.size == 0 or yaw_proxy.size == 0:
+        return []
+    dt_sec = float(times[1] - times[0]) if times.size > 1 else 0.0
+    yaw_smooth = _smooth_seconds(yaw_proxy, cfg.yaw_smooth_seconds, dt_sec)
+    mask = np.abs(yaw_smooth) >= float(cfg.turn_threshold)
+    runs = _find_runs(mask)
+    duration = float(duration_s) if duration_s is not None else float(times[-1])
+    segments: List[Tuple[int, int]] = []
+    min_samples = max(1, int(round(cfg.turn_min_duration_seconds / dt_sec))) if dt_sec > 0 else 1
+    for (s_idx, e_idx) in runs:
+        if (e_idx - s_idx + 1) >= min_samples:
+            segments.append((s_idx, e_idx))
+
+    # merge gaps
+    merged: List[Tuple[int, int]] = []
+    max_gap = int(round(cfg.turn_merge_gap_seconds / dt_sec)) if dt_sec > 0 else 0
+    for seg in segments:
+        if not merged:
+            merged.append(seg)
+            continue
+        last_s, last_e = merged[-1]
+        if seg[0] <= last_e + max_gap:
+            merged[-1] = (last_s, max(last_e, seg[1]))
+        else:
+            merged.append(seg)
+
+    events: List[VehicleEvent] = []
+    for (s_idx, e_idx) in merged:
+        start_t = float(times[s_idx])
+        end_t = float(times[e_idx] + dt_sec)
+        segment = yaw_smooth[s_idx:e_idx + 1]
+        direction = "right" if float(np.median(segment)) > 0 else "left"
+        score = float(np.median(np.abs(segment)))
+        events.append(
+            VehicleEvent(
+                start=start_t,
+                end=min(duration, end_t),
+                kind=f"vehicle_turn_{direction}",
+                score=score,
+                meta={"peak_s": (start_t + end_t) / 2.0, "direction": direction},
+            )
+        )
+    return events
+
+
+def detect_vehicle_dynamics(
+    video_path: Path,
+    config: VehicleDynamicsDetectConfig | dict | None = None,
+) -> Dict[str, List[VehicleEvent]]:
+    base_cfg = VehicleDynamicsDetectConfig()
+    if config is None:
+        cfg = base_cfg
+    elif isinstance(config, VehicleDynamicsDetectConfig):
+        cfg = VehicleDynamicsDetectConfig.from_dict(config.__dict__, base=base_cfg)
+    else:
+        cfg = VehicleDynamicsDetectConfig.from_dict(config, base=base_cfg)
+
+    times, speed_proxy, yaw_proxy, dt_sec = _compute_vehicle_flow_series(
+        video_path=video_path,
+        cfg=cfg,
+    )
+    if times.size == 0:
+        empty = {
+            "vehicle_moving": [],
+            "vehicle_stopped": [],
+            "vehicle_accel": [],
+            "vehicle_decel": [],
+            "vehicle_turn": [],
+        }
+        return empty
+
+    duration_s = float(times[-1] + dt_sec)
+    moving, stopped = detect_vehicle_state_segments(
+        times, speed_proxy, cfg, duration_s=duration_s
+    )
+    accel = detect_accel_spikes(times, speed_proxy, cfg, duration_s=duration_s)
+    decel = detect_decel_spikes(times, speed_proxy, cfg, duration_s=duration_s)
+    turns = detect_turn_segments(times, yaw_proxy, cfg, duration_s=duration_s)
+
+    by_kind: Dict[str, List[VehicleEvent]] = {
+        "vehicle_moving": moving,
+        "vehicle_stopped": stopped,
+        "vehicle_accel": accel,
+        "vehicle_decel": decel,
+        "vehicle_turn": turns,
+    }
+    return by_kind
+
 
 
 def _select_video_from_pair(pair, camera: str) -> Path:

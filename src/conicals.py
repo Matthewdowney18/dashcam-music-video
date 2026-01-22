@@ -6,13 +6,19 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .audio_events import detect_audio_events_for_clip
-from .motion_events import detect_motion_events, detect_optical_flow
+from .motion_events import (
+    detect_motion_events,
+    detect_optical_flow,
+    detect_vehicle_dynamics,
+)
 from .config_loader import ConfigLoader
 from .detection_profiles import (
     MotionEventDetectConfig,
     OpticalFlowDetectConfig,
+    VehicleDynamicsDetectConfig,
     get_flow_profile,
     get_motion_profile,
+    get_vehicle_profile,
 )
 
 
@@ -124,6 +130,51 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
         },
     },
     {
+        "key": "vehicle_moving_road",
+        "title": "MOVING",
+        "enabled": True,
+        "detector": "vehicle_dynamics",
+        "camera": "road",
+        "profile": "default",
+        "params": {"kind": "moving"},
+    },
+    {
+        "key": "vehicle_stopped_road",
+        "title": "STOPPED",
+        "enabled": True,
+        "detector": "vehicle_dynamics",
+        "camera": "road",
+        "profile": "default",
+        "params": {"kind": "stopped"},
+    },
+    {
+        "key": "vehicle_accel_road",
+        "title": "ACCEL",
+        "enabled": True,
+        "detector": "vehicle_dynamics",
+        "camera": "road",
+        "profile": "default",
+        "params": {"kind": "accel"},
+    },
+    {
+        "key": "vehicle_decel_road",
+        "title": "DECEL",
+        "enabled": True,
+        "detector": "vehicle_dynamics",
+        "camera": "road",
+        "profile": "default",
+        "params": {"kind": "decel"},
+    },
+    {
+        "key": "vehicle_turn_road",
+        "title": "TURN",
+        "enabled": True,
+        "detector": "vehicle_dynamics",
+        "camera": "road",
+        "profile": "default",
+        "params": {"kind": "turn"},
+    },
+    {
         "key": "score",
         "title": "SCORE",
         "enabled": True,
@@ -136,8 +187,22 @@ DEFAULT_LANE_SPECS: List[Dict[str, object]] = [
 
 DEFAULT_SCORING_MODELS: Dict[str, Dict[str, object]] = {
     "weighted_union": {
-        "sources": ["motion_road", "motion_cabin", "audio"],
-        "weights": {"motion_road": 0.4, "motion_cabin": 0.3, "audio": 0.3},
+        "sources": [
+            "motion_road",
+            "motion_cabin",
+            "audio",
+            "vehicle_accel_road",
+            "vehicle_decel_road",
+            "vehicle_turn_road",
+        ],
+        "weights": {
+            "motion_road": 0.35,
+            "motion_cabin": 0.25,
+            "audio": 0.25,
+            "vehicle_accel_road": 0.05,
+            "vehicle_decel_road": 0.05,
+            "vehicle_turn_road": 0.05,
+        },
         "normalize": "sum",
         "peak_strategy": "best_weighted",
         "merge_overlaps": True,
@@ -156,12 +221,14 @@ def _parse_detection_overrides(
     data: Dict[str, object],
 ) -> Dict[str, Dict[str, Dict[str, object]]]:
     if not isinstance(data, dict):
-        return {"motion": {}, "flow": {}}
+        return {"motion": {}, "flow": {}, "vehicle": {}}
     motion = data.get("motion") if isinstance(data.get("motion"), dict) else {}
     flow = data.get("flow") if isinstance(data.get("flow"), dict) else {}
+    vehicle = data.get("vehicle") if isinstance(data.get("vehicle"), dict) else {}
     return {
         "motion": {str(k): dict(v) for k, v in motion.items()},
         "flow": {str(k): dict(v) for k, v in flow.items()},
+        "vehicle": {str(k): dict(v) for k, v in vehicle.items()},
     }
 
 
@@ -413,6 +480,17 @@ def _resolve_flow_config(
     return OpticalFlowDetectConfig.from_dict(spec.params, base=profile_cfg)
 
 
+def _resolve_vehicle_config(
+    spec: LaneSpec,
+    detection_overrides: Dict[str, Dict[str, Dict[str, object]]],
+) -> VehicleDynamicsDetectConfig:
+    profile_name = spec.profile or "default"
+    profile_cfg = get_vehicle_profile(profile_name)
+    profile_override = detection_overrides.get("vehicle", {}).get(profile_name, {})
+    profile_cfg = VehicleDynamicsDetectConfig.from_dict(profile_override, base=profile_cfg)
+    return VehicleDynamicsDetectConfig.from_dict(spec.params, base=profile_cfg)
+
+
 def _build_motion_lane(
     spec: LaneSpec,
     road: Path,
@@ -553,6 +631,75 @@ def _build_optical_flow_lane(
     return _merge_overlapping(lane_events)
 
 
+def _build_vehicle_lane(
+    spec: LaneSpec,
+    road: Path,
+    cabin: Path,
+    detect_camera: str,
+    detection_overrides: Dict[str, Dict[str, Dict[str, object]]],
+    cache: Dict[tuple, Dict[str, List[object]]],
+) -> List[OverlayEvent]:
+    if not _camera_allowed(spec.camera, detect_camera):
+        return []
+    cfg = _resolve_vehicle_config(spec, detection_overrides)
+    if spec.camera == "cabin":
+        path = cabin
+    elif spec.camera == "road":
+        path = road
+    else:
+        path = road
+
+    def _hashable_value(value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        if isinstance(value, dict):
+            return tuple(sorted((str(k), _hashable_value(v)) for k, v in value.items()))
+        return value
+
+    cache_key = (
+        str(path),
+        tuple(sorted((k, _hashable_value(v)) for k, v in cfg.__dict__.items())),
+    )
+    if cache_key not in cache:
+        cache[cache_key] = detect_vehicle_dynamics(video_path=path, config=cfg)
+
+    kind_raw = str(spec.params.get("kind", "")).strip().lower()
+    kind_map = {
+        "moving": "vehicle_moving",
+        "stopped": "vehicle_stopped",
+        "accel": "vehicle_accel",
+        "decel": "vehicle_decel",
+        "turn": "vehicle_turn",
+    }
+    target_kind = kind_map.get(kind_raw, kind_raw)
+    if target_kind not in cache[cache_key]:
+        return []
+
+    events = cache[cache_key][target_kind]
+    scores = [float(getattr(e, "score", 0.0)) for e in events]
+    strengths = _normalize_strength(scores)
+    lane_events: List[OverlayEvent] = []
+    for i, e in enumerate(events):
+        start = float(getattr(e, "start", 0.0))
+        end = float(getattr(e, "end", 0.0))
+        meta = getattr(e, "meta", {}) or {}
+        peak = float(meta.get("peak_s", (start + end) / 2.0))
+        label = spec.title
+        direction = meta.get("direction")
+        if isinstance(direction, str) and direction:
+            label = f"{label} {direction.upper()}"
+        lane_events.append(
+            OverlayEvent(
+                start=start,
+                end=end,
+                peak=peak,
+                label=label,
+                strength01=strengths[i] if i < len(strengths) else 1.0,
+            )
+        )
+    return _merge_overlapping(lane_events)
+
+
 def build_conical_lanes(
     road: Path,
     cabin: Path,
@@ -574,6 +721,7 @@ def build_conical_lanes(
     scoring_models = _parse_scoring_models(loader.load_scoring())
     detection_overrides = _parse_detection_overrides(loader.load_detection_overrides())
     lane_keys = [spec.key for spec in specs if spec.detector != "score"]
+    vehicle_cache: Dict[tuple, Dict[str, List[object]]] = {}
     registry: Dict[str, Callable[[LaneSpec], List[OverlayEvent]]] = {
         "motion": lambda spec: _build_motion_lane(
             spec, road, cabin, detect_camera, detection_overrides
@@ -581,6 +729,9 @@ def build_conical_lanes(
         "audio": lambda spec: _build_audio_lane(spec, road, cabin, detect_camera),
         "optical_flow": lambda spec: _build_optical_flow_lane(
             spec, road, cabin, detect_camera, detection_overrides
+        ),
+        "vehicle_dynamics": lambda spec: _build_vehicle_lane(
+            spec, road, cabin, detect_camera, detection_overrides, vehicle_cache
         ),
     }
 

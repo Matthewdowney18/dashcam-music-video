@@ -15,3 +15,8 @@
 
 [flow.legacy_percentile]
 # flow_percentile = 60.0
+
+[vehicle.default]
+# moving_threshold = 0.20
+# stopped_threshold = 0.12
+# turn_threshold = 0.10

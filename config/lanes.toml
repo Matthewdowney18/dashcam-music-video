@@ -44,6 +44,51 @@ profile = "legacy_percentile"
 params = { downscale_width = 320, frame_step = 2, min_duration_sec = 2.0, flow_percentile = 60.0 }
 
 [[lane]]
+key = "vehicle_moving_road"
+title = "MOVING"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+profile = "default"
+params = { kind = "moving" }
+
+[[lane]]
+key = "vehicle_stopped_road"
+title = "STOPPED"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+profile = "default"
+params = { kind = "stopped" }
+
+[[lane]]
+key = "vehicle_accel_road"
+title = "ACCEL"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+profile = "default"
+params = { kind = "accel" }
+
+[[lane]]
+key = "vehicle_decel_road"
+title = "DECEL"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+profile = "default"
+params = { kind = "decel" }
+
+[[lane]]
+key = "vehicle_turn_road"
+title = "TURN"
+enabled = true
+detector = "vehicle_dynamics"
+camera = "road"
+profile = "default"
+params = { kind = "turn" }
+
+[[lane]]
 key = "score"
 title = "SCORE"
 enabled = true
